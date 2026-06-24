@@ -47,6 +47,7 @@ rwt new   <name> --from <develop|bugfixes> [--type <prefix>] [--idea] [--force-m
 rwt setup <name|.>     # (re)warm uv/cargo/pnpm in an existing worktree
 rwt ls [--live]        # list worktrees + instance capability (--live: slot/port/running)
 rwt rm    <name> [--keep-branch] [--force] [--purge-memory]
+rwt rm    --merged [--yes] [--keep-branch] [--force]   # sweep merged worktrees
 rwt refresh            # fetch + ff-only every long-lived base, warm cold ones
 rwt go    <name>       # print `cd <path>` into a worktree (eval it)
 rwt config             # show umbrella path + dev flags
@@ -116,6 +117,19 @@ their line removed. These keys sit **outside** the app's `MANAGED_ENV_KEYS`, so
 `refresh` re-asserts the flags on every present long-lived base unconditionally —
 that's what keeps `VITE_PERSIST_STORE` in place so a post-refresh restart doesn't
 log you out. The write is skipped when nothing would change, so it stays a no-op.
+
+## Bulk cleanup (`rwt rm --merged`)
+
+After a few PRs land, `rwt rm --merged` removes every non-long-lived worktree
+whose branch is already merged into an upstream base — the worktree analogue of
+`git branch --merged`. It fetches `upstream` first (so the check isn't stale),
+lists the candidates, and asks before removing (`--yes` skips the prompt). Each
+removal reuses the normal teardown: dirty/unpushed guard (override with
+`--force`), dev:web instance clean, worktree + branch deletion.
+
+```sh
+rwt refresh && rwt rm --merged       # warm bases, then clear landed worktrees
+```
 
 ## Jumping into a worktree (`rwt go`)
 

@@ -76,6 +76,16 @@ func MergeFFOnly(ctx context.Context, worktree, ref string) error {
 	return err
 }
 
+// IsAncestor reports whether ancestor is an ancestor of descendant (i.e.
+// ancestor is fully contained in descendant's history — the merged check).
+// Best-effort: `merge-base --is-ancestor` exits 0 for yes, non-zero for no or
+// on any error, all of which collapse to false here.
+func IsAncestor(ctx context.Context, dir, ancestor, descendant string) bool {
+	cmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd.Dir = dir
+	return cmd.Run() == nil
+}
+
 // Worktree is one entry from `git worktree list --porcelain`.
 type Worktree struct {
 	Path   string
