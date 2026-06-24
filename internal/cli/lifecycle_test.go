@@ -20,13 +20,11 @@ func TestLifecycle(t *testing.T) {
 	t.Setenv("RWT_UMBRELLA", umbrella)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // no config file -> default flags on
 
-	// Stub the env warmer, instance teardown and IDEA close so the test stays
-	// hermetic (real `idea close` would write .idea/ into the worktree).
-	origInstall, origClean, origIdea := installRun, devWebClean, ideaClose
+	// Stub the env warmer and instance teardown so the test stays hermetic.
+	origInstall, origClean := installRun, devWebClean
 	installRun = func(context.Context, string, install.Opts) error { return nil }
 	devWebClean = func(context.Context, string, string) error { return nil }
-	ideaClose = func(context.Context, string) {}
-	t.Cleanup(func() { installRun, devWebClean, ideaClose = origInstall, origClean, origIdea })
+	t.Cleanup(func() { installRun, devWebClean = origInstall, origClean })
 
 	// --- new ---
 	if err := runCLI(t, "new", "demo", "--from", "develop"); err != nil {

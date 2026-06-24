@@ -95,8 +95,7 @@ log you out. The write is skipped when nothing would change, so it stays a no-op
 ## Status
 
 v0 (shim) + most of v1 (lifecycle + doctor) implemented. Deferred: branch-guard
-hook install, IDEA close on `rm`, `CLAUDE.local.md`/`WORKTREE.md` stamping,
-`rwt pr`.
+hook install, `CLAUDE.local.md`/`WORKTREE.md` stamping, `rwt pr`.
 
 ## Environment overrides
 

@@ -25,19 +25,6 @@ var devWebClean = func(ctx context.Context, frontendDir, name string) error {
 	return cmd.Run()
 }
 
-// ideaClose best-effort closes an open IntelliJ IDEA project so it releases file
-// handles before the worktree is removed. No-op when `idea` is not on PATH;
-// warns but never fails. A package var so tests can stub it.
-var ideaClose = func(ctx context.Context, wt string) {
-	if _, err := exec.LookPath("idea"); err != nil {
-		return
-	}
-	fmt.Printf("closing IDEA project %s...\n", filepath.Base(wt))
-	if err := exec.CommandContext(ctx, "idea", "close", wt).Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: idea close failed (continuing): %v\n", err)
-	}
-}
-
 func rmCmd() *cobra.Command {
 	var (
 		keepBranch  bool
@@ -91,11 +78,7 @@ func runRm(ctx context.Context, name string, keepBranch, force, purgeMemory bool
 		}
 	}
 
-	// Step 4 — best-effort: close the IDEA project so it releases file handles
-	// before the worktree is removed. Only attempted when `idea` is on PATH.
-	ideaClose(ctx, wt)
-
-	// Step 5 — free the dev:web instance, but ONLY if instance-capable. A
+	// Step 3 — free the dev:web instance, but ONLY if instance-capable. A
 	// bugfixes worktree never got an INSTANCE_NAME, so there is nothing to
 	// clean — shelling out to --clean would be pointless.
 	if detect.Capability(wt).Capable {
@@ -105,13 +88,13 @@ func runRm(ctx context.Context, name string, keepBranch, force, purgeMemory bool
 		}
 	}
 
-	// Step 6 — remove the worktree.
+	// Step 4 — remove the worktree.
 	if err := git.WorktreeRemove(ctx, host, wt, force); err != nil {
 		return err
 	}
 	fmt.Printf("removed worktree %s\n", filepath.Base(wt))
 
-	// Step 7 — delete the local branch unless asked to keep it. Remote on
+	// Step 5 — delete the local branch unless asked to keep it. Remote on
 	// origin is left untouched (PR history).
 	if !keepBranch && branch != "" {
 		if err := git.DeleteBranch(ctx, host, branch, force); err != nil {
@@ -121,7 +104,7 @@ func runRm(ctx context.Context, name string, keepBranch, force, purgeMemory bool
 		}
 	}
 
-	// Step 8 — purge the path-keyed Claude memory dir only when asked. Left in
+	// Step 6 — purge the path-keyed Claude memory dir only when asked. Left in
 	// place by default so PR notes survive a worktree teardown.
 	if purgeMemory {
 		purgeClaudeMemory(wt)
