@@ -48,6 +48,7 @@ rwt setup <name|.>     # (re)warm uv/cargo/pnpm in an existing worktree
 rwt ls                 # list worktrees + instance capability
 rwt rm    <name> [--keep-branch] [--force] [--purge-memory]
 rwt refresh            # fetch + ff-only every long-lived base, warm cold ones
+rwt go    <name>       # print `cd <path>` into a worktree (eval it)
 rwt config             # show umbrella path + dev flags
 rwt config path <dir>  # set the rotki umbrella location
 rwt config <flag> on|off    # toggle a dev flag
@@ -109,6 +110,22 @@ their line removed. These keys sit **outside** the app's `MANAGED_ENV_KEYS`, so
 `refresh` re-asserts the flags on every present long-lived base unconditionally —
 that's what keeps `VITE_PERSIST_STORE` in place so a post-refresh restart doesn't
 log you out. The write is skipped when nothing would change, so it stays a no-op.
+
+## Jumping into a worktree (`rwt go`)
+
+A binary can't change its parent shell's cwd, so `rwt go <name>` prints a
+`cd <path>` line for you to eval (the same trick as `rwt new --here`):
+
+```sh
+eval "$(rwt go login-crash)"     # bare name; the prefix is resolved for you
+```
+
+Wrap it once in your shell rc so `rwt go x` cds directly, and the installed
+completion will suggest worktree names:
+
+```sh
+rwt() { if [ "$1" = go ]; then cd "$(command rwt go "${@:2}" | sed 's/^cd //')"; else command rwt "$@"; fi; }
+```
 
 ## Shell completion
 

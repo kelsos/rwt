@@ -56,6 +56,7 @@ func newRootCmd() *cobra.Command {
 		lsCmd(),
 		rmCmd(),
 		refreshCmd(),
+		goCmd(),
 		configCmd(),
 		doctorCmd(),
 	)
