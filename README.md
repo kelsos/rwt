@@ -45,7 +45,7 @@ file > nothing. State is stored in `~/.config/rwt/config.json` (honoring
 ```
 rwt new   <name> --from <develop|bugfixes> [--type <prefix>] [--idea] [--force-managed-env] [--here]
 rwt setup <name|.>     # (re)warm uv/cargo/pnpm in an existing worktree
-rwt ls                 # list worktrees + instance capability
+rwt ls [--live]        # list worktrees + instance capability (--live: slot/port/running)
 rwt rm    <name> [--keep-branch] [--force] [--purge-memory]
 rwt refresh            # fetch + ff-only every long-lived base, warm cold ones
 rwt go    <name>       # print `cd <path>` into a worktree (eval it)
@@ -84,6 +84,12 @@ The dev:web multi-instance feature lives on `develop`, not `bugfixes`. `rwt`
 detects it by file-stat (`frontend/scripts/dev-instance/index.ts`), not by
 branch name, and refuses to write `INSTANCE_NAME` into a checkout that would
 silently ignore it (no isolation). `--force-managed-env` overrides.
+
+`rwt ls --live` adds runtime state: it reads the app's port registry
+(`$XDG_DATA_HOME/rotki-dev/.port-index.json`, or `$ROTKI_DEV_INSTANCES_DIR`),
+maps each worktree's `INSTANCE_NAME` to its slot's dev port, and probes whether
+that port is listening — so you can see which instances are actually up and on
+which port. Read-only: `rwt` never writes the registry.
 
 ## Dev flags
 

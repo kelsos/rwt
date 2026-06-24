@@ -144,6 +144,13 @@ func AppendInstanceName(worktree, name string) error {
 	return err
 }
 
+// ReadInstanceName returns the INSTANCE_NAME value written into a worktree's
+// .env.development.local, if any. Read-only counterpart to AppendInstanceName,
+// used by `rwt ls --live` to map a worktree to its registry slot.
+func ReadInstanceName(worktree string) (string, bool, error) {
+	return currentInstanceName(filepath.Join(worktree, rotki.EnvFileRel))
+}
+
 // currentInstanceName returns the value of an unmanaged or managed
 // INSTANCE_NAME line if present.
 func currentInstanceName(path string) (value string, found bool, err error) {
