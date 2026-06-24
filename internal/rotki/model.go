@@ -10,6 +10,7 @@ package rotki
 import (
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/kelsos/rwt/internal/config"
 )
@@ -29,11 +30,27 @@ const HostWorktree = "develop"
 // rwt refresh.
 var LongLived = []string{"develop", "bugfixes", "master"}
 
-// BranchPrefix maps a --from base to the branch (and worktree-dir) prefix.
-// Bases not listed here are rejected by rwt new.
+// BranchPrefix maps a --from base to the DEFAULT branch (and worktree-dir)
+// prefix. Bases not listed here are rejected by rwt new. The default is
+// overridable per-worktree with `rwt new --type` (see Prefixes).
 var BranchPrefix = map[string]string{
 	"develop":  "feat",
 	"bugfixes": "fix",
+}
+
+// Prefixes are the conventional-commit types accepted as a branch/worktree
+// prefix via `rwt new --type`. feat/fix are also the defaults derived from
+// develop/bugfixes (see BranchPrefix); the rest are opt-in. This is the single
+// source of truth for "known prefix": resolveWorktree searches all of them so a
+// worktree resolves by bare name whatever prefix it was created with.
+var Prefixes = []string{
+	"feat", "fix", "chore", "refactor", "docs", "test", "perf", "build", "ci", "style", "revert",
+}
+
+// IsPrefix reports whether p is a known branch prefix (a Conventional Commit
+// type rwt will create a worktree for).
+func IsPrefix(p string) bool {
+	return slices.Contains(Prefixes, p)
 }
 
 // Port model — mirror of frontend/scripts/dev-instance/port-registry.ts.

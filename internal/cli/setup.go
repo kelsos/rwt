@@ -32,7 +32,7 @@ func setupCmd() *cobra.Command {
 
 // resolveWorktree turns a name or "." into an absolute worktree path. A bare
 // name is looked up under the umbrella by matching the directory suffix, since
-// the on-disk dir carries the branch prefix (feat-/fix-).
+// the on-disk dir carries the branch prefix (feat-/fix-/chore-/...).
 func resolveWorktree(arg string) (string, error) {
 	if arg == "." {
 		return os.Getwd()
@@ -40,10 +40,11 @@ func resolveWorktree(arg string) (string, error) {
 	if filepath.IsAbs(arg) {
 		return arg, nil
 	}
-	// Try exact dir name first, then prefix-name variants.
+	// Try exact dir name first, then prefix-name variants across every known
+	// prefix (not just the --from defaults) so --type worktrees resolve too.
 	umbrella := rotki.UmbrellaRoot()
 	candidates := []string{arg}
-	for _, p := range rotki.BranchPrefix {
+	for _, p := range rotki.Prefixes {
 		candidates = append(candidates, rotki.WorktreeDir(p, arg))
 	}
 	for _, c := range candidates {

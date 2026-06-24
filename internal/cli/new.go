@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/kelsos/rwt/internal/detect"
 	"github.com/kelsos/rwt/internal/envfile"
@@ -21,6 +22,7 @@ var installRun = install.Run
 func newCmd() *cobra.Command {
 	var (
 		from            string
+		typ             string
 		idea            bool
 		forceManagedEnv bool
 		here            bool
@@ -30,23 +32,34 @@ func newCmd() *cobra.Command {
 		Short: "Create a worktree, warm its envs, and enable instance mode",
 		Long: "Creates ../<prefix>-<name> off upstream/<base>, warms uv/cargo/pnpm,\n" +
 			"and (if the checkout supports it) appends INSTANCE_NAME for dev:web\n" +
-			"instance mode. Idempotent: re-run to resume after a failed step.",
+			"instance mode. Idempotent: re-run to resume after a failed step.\n\n" +
+			"<prefix> defaults to the --from base (develop->feat, bugfixes->fix);\n" +
+			"override it with --type to use any Conventional Commit type.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runNew(cmd.Context(), args[0], from, idea, forceManagedEnv, here)
+			return runNew(cmd.Context(), args[0], from, typ, idea, forceManagedEnv, here)
 		},
 	}
 	cmd.Flags().StringVar(&from, "from", "develop", "base worktree to branch off (develop|bugfixes)")
+	cmd.Flags().StringVarP(&typ, "type", "t", "", "branch prefix / Conventional Commit type (default: derived from --from)")
 	cmd.Flags().BoolVar(&idea, "idea", false, "open the worktree in IntelliJ IDEA")
 	cmd.Flags().BoolVar(&forceManagedEnv, "force-managed-env", false, "write INSTANCE_NAME even if the checkout looks unsupported")
 	cmd.Flags().BoolVar(&here, "here", false, "print a `cd <path>` snippet on stdout for eval")
 	return cmd
 }
 
-func runNew(ctx context.Context, name, from string, idea, forceManagedEnv, here bool) error {
+func runNew(ctx context.Context, name, from, typ string, idea, forceManagedEnv, here bool) error {
+	// --from picks the base to branch off (and the default prefix); --type, when
+	// set, overrides the prefix with any known Conventional Commit type.
 	prefix, ok := rotki.BranchPrefix[from]
 	if !ok {
 		return fmt.Errorf("--from must be one of develop|bugfixes, got %q", from)
+	}
+	if typ != "" {
+		if !rotki.IsPrefix(typ) {
+			return fmt.Errorf("--type must be one of %s, got %q", strings.Join(rotki.Prefixes, "|"), typ)
+		}
+		prefix = typ
 	}
 	host := rotki.HostWorktreePath()
 	branch := rotki.Branch(prefix, name)

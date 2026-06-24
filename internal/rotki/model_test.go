@@ -26,3 +26,22 @@ func TestBranchAndDir(t *testing.T) {
 		t.Errorf("WorktreeDir = %q", d)
 	}
 }
+
+func TestIsPrefix(t *testing.T) {
+	// Defaults derived from --from must also be valid --type values.
+	for _, p := range BranchPrefix {
+		if !IsPrefix(p) {
+			t.Errorf("default prefix %q not in Prefixes", p)
+		}
+	}
+	for _, p := range []string{"chore", "refactor", "docs", "perf"} {
+		if !IsPrefix(p) {
+			t.Errorf("IsPrefix(%q) = false, want true", p)
+		}
+	}
+	for _, p := range []string{"", "feature", "bugfix", "wip"} {
+		if IsPrefix(p) {
+			t.Errorf("IsPrefix(%q) = true, want false", p)
+		}
+	}
+}

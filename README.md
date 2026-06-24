@@ -43,7 +43,7 @@ file > nothing. State is stored in `~/.config/rwt/config.json` (honoring
 ## Commands
 
 ```
-rwt new   <name> --from <develop|bugfixes> [--idea] [--force-managed-env] [--here]
+rwt new   <name> --from <develop|bugfixes> [--type <prefix>] [--idea] [--force-managed-env] [--here]
 rwt setup <name|.>     # (re)warm uv/cargo/pnpm in an existing worktree
 rwt ls                 # list worktrees + instance capability
 rwt rm    <name> [--keep-branch] [--force] [--purge-memory]
@@ -58,6 +58,23 @@ rwt doctor             # preflight sccache / tools / umbrella
 `bugfixes`→`fix/…`), warms the envs, then — only if the checkout supports it —
 enables dev:web instance mode by appending `INSTANCE_NAME`. It is idempotent:
 re-run to resume after a failed step.
+
+### Branch prefix (`--type`)
+
+The prefix defaults to the `--from` base (`develop`→`feat`, `bugfixes`→`fix`).
+Override it with `--type` (`-t`) to use any Conventional Commit type, keeping
+`--from` as the base to branch off:
+
+```sh
+rwt new dark-mode                       # ../feat-dark-mode  on feat/dark-mode
+rwt new login-crash --from bugfixes     # ../fix-login-crash on fix/login-crash
+rwt new bump-deps --type chore          # ../chore-bump-deps on chore/bump-deps (off develop)
+rwt new flaky-e2e  --type test --from bugfixes
+```
+
+Accepted types: `feat`, `fix`, `chore`, `refactor`, `docs`, `test`, `perf`,
+`build`, `ci`, `style`, `revert`. `ls` / `setup` / `rm` resolve a worktree by
+bare name across all of these.
 
 ## Capability detection
 
