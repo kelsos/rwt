@@ -52,6 +52,7 @@ rwt config             # show umbrella path + dev flags
 rwt config path <dir>  # set the rotki umbrella location
 rwt config <flag> on|off    # toggle a dev flag
 rwt doctor             # preflight sccache / tools / umbrella
+rwt completion install [bash|zsh|fish]   # install/update shell completion
 ```
 
 `new` creates `../<prefix>-<name>` off `upstream/<base>` (`develop`→`feat/…`,
@@ -108,6 +109,19 @@ their line removed. These keys sit **outside** the app's `MANAGED_ENV_KEYS`, so
 `refresh` re-asserts the flags on every present long-lived base unconditionally —
 that's what keeps `VITE_PERSIST_STORE` in place so a post-refresh restart doesn't
 log you out. The write is skipped when nothing would change, so it stays a no-op.
+
+## Shell completion
+
+```sh
+rwt completion install        # detects your shell from $SHELL
+rwt completion install zsh    # or name it explicitly (bash|zsh|fish)
+```
+
+Writes a per-user completion script (no root): zsh into a writable dir already
+on your `$fpath` — falling back to `~/.zsh/completions` with a one-line `fpath`
+hint — bash into `~/.local/share/bash-completion/completions`, fish into
+`$XDG_CONFIG_HOME/fish/completions`. Re-run after upgrading rwt to refresh it.
+(`rwt completion <shell>` still just prints the script to stdout, à la Cobra.)
 
 ## Status
 

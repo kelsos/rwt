@@ -59,5 +59,16 @@ func newRootCmd() *cobra.Command {
 		configCmd(),
 		doctorCmd(),
 	)
+	// Add an `install` subcommand under Cobra's auto-generated `completion`
+	// command (which only prints), so users can install/update completions in
+	// one step. InitDefaultCompletionCmd materializes that command now; Execute
+	// sees it already present and won't re-add it.
+	root.InitDefaultCompletionCmd()
+	for _, sub := range root.Commands() {
+		if sub.Name() == "completion" {
+			sub.AddCommand(completionInstallCmd(root))
+			break
+		}
+	}
 	return root
 }
