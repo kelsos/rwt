@@ -162,8 +162,15 @@ hint — bash into `~/.local/share/bash-completion/completions`, fish into
 
 ## Status
 
-v0 (shim) + most of v1 (lifecycle + doctor) implemented. Deferred: branch-guard
-hook install, `CLAUDE.local.md`/`WORKTREE.md` stamping, `rwt pr`.
+Feature-complete for its intended scope: worktree lifecycle (`new` / `setup` /
+`ls` / `rm` / `refresh`), `config`, `doctor`, shell completion, and the
+conveniences `--type`, `rwt go`, `ls --live`, and `rm --merged`.
+
+Deliberately not planned (considered and dropped): `rwt pr` (just use `gh`), the
+`rm` process-kill backstop, branch-guard hook install (would need an upstream
+Husky extension point), and `CLAUDE.local.md`/`WORKTREE.md` stamping. IntelliJ
+project-close on `rm` is also out — the `idea` launcher has no `close` verb, and
+on Linux open editor handles don't block worktree removal anyway.
 
 ## Environment overrides
 
