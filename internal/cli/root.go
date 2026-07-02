@@ -17,6 +17,7 @@ var noUmbrellaNeeded = map[string]bool{
 	"doctor":     true,
 	"help":       true,
 	"completion": true,
+	"version":    true,
 	"__complete": true,
 }
 
@@ -29,8 +30,9 @@ func Execute() error {
 // Execute so tests can drive it via SetArgs.
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "rwt",
-		Short: "rotki git-worktree tool",
+		Use:     "rwt",
+		Version: resolveVersion(),
+		Short:   "rotki git-worktree tool",
 		Long: "rwt spawns and tears down git worktrees for parallel-agent / parallel-PR work\n" +
 			"on the rotki app repo, and warms each worktree's uv / cargo / pnpm envs.\n" +
 			"It is a thin shim: the app owns dev:web slot allocation and the port registry.",
@@ -59,6 +61,7 @@ func newRootCmd() *cobra.Command {
 		goCmd(),
 		configCmd(),
 		doctorCmd(),
+		versionCmd(),
 	)
 	// Add an `install` subcommand under Cobra's auto-generated `completion`
 	// command (which only prints), so users can install/update completions in

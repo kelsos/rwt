@@ -54,6 +54,7 @@ rwt config             # show umbrella path + dev flags
 rwt config path <dir>  # set the rotki umbrella location
 rwt config <flag> on|off    # toggle a dev flag
 rwt doctor             # preflight sccache / tools / umbrella
+rwt version            # print the rwt version (also `rwt --version`)
 rwt completion install [bash|zsh|fish]   # install/update shell completion
 ```
 
