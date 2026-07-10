@@ -25,13 +25,16 @@ type Step struct {
 	Argv []string // command + args
 }
 
-// DefaultSteps are the three ecosystem warmers. colibri is cargo fetch only —
-// the actual build is deferred to the first `pnpm dev:web`.
+// DefaultSteps are the three ecosystem warmers. Every step is lockfile-based
+// and refuses to mutate its lockfile (pnpm --frozen-lockfile, uv --frozen,
+// cargo --locked). colibri gets a full `cargo build` so the compiled artifact
+// is warm and the first `pnpm dev:web` doesn't pay the cold-build cost. The
+// build implicitly fetches, so no separate fetch step is needed.
 func DefaultSteps() []Step {
 	return []Step{
 		{Name: "pnpm", Dir: "frontend", Argv: []string{"pnpm", "install", "--frozen-lockfile", "--prefer-offline"}},
 		{Name: "uv", Dir: ".", Argv: []string{"uv", "sync", "--frozen"}},
-		{Name: "cargo", Dir: ".", Argv: []string{"cargo", "fetch", "--manifest-path", "colibri/Cargo.toml"}},
+		{Name: "cargo", Dir: ".", Argv: []string{"cargo", "build", "--locked", "--manifest-path", "colibri/Cargo.toml"}},
 	}
 }
 
