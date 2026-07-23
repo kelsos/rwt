@@ -23,18 +23,32 @@ type Step struct {
 	Name string   // log prefix, e.g. "pnpm"
 	Dir  string   // working dir relative to the worktree root
 	Argv []string // command + args
+	// SkipIfAbsent, when set, is a path relative to the worktree root that must
+	// exist for the step to run. A step whose subproject is missing from the
+	// checked-out base (e.g. the `crates` workspace on an older `bugfixes`) is
+	// warned about and skipped rather than counted as a failure.
+	SkipIfAbsent string
 }
 
-// DefaultSteps are the three ecosystem warmers. Every step is lockfile-based
-// and refuses to mutate its lockfile (pnpm --frozen-lockfile, uv --frozen,
-// cargo --locked). colibri gets a full `cargo build` so the compiled artifact
-// is warm and the first `pnpm dev:web` doesn't pay the cold-build cost. The
-// build implicitly fetches, so no separate fetch step is needed.
+// DefaultSteps are the ecosystem warmers. Every step is lockfile-based and
+// refuses to mutate its lockfile (pnpm --frozen-lockfile, uv --frozen, cargo
+// --locked). The two Rust warmers each get a full `cargo build` so the compiled
+// artifacts are warm and the first dev launch doesn't pay the cold-build cost;
+// the build implicitly fetches, so no separate fetch step is needed.
+//
+// colibri and starling live in separate cargo workspaces with separate target
+// dirs, so the builds run concurrently without contending on a target lock.
+// colibri is a single-package project; starling is the electron-mode supervisor
+// in the `crates` workspace, and `-p starling` pulls in starling-core and
+// starling-proxy (its path deps), matching what `pnpm dev:web` warms. Both Rust
+// steps SkipIfAbsent their manifest so a base that predates a subproject (e.g.
+// `crates` not yet on `bugfixes`) is warned about and skipped, not failed.
 func DefaultSteps() []Step {
 	return []Step{
 		{Name: "pnpm", Dir: "frontend", Argv: []string{"pnpm", "install", "--frozen-lockfile", "--prefer-offline"}},
 		{Name: "uv", Dir: ".", Argv: []string{"uv", "sync", "--frozen"}},
-		{Name: "cargo", Dir: ".", Argv: []string{"cargo", "build", "--locked", "--manifest-path", "colibri/Cargo.toml"}},
+		{Name: "colibri", Dir: ".", Argv: []string{"cargo", "build", "--locked", "--manifest-path", "colibri/Cargo.toml"}, SkipIfAbsent: "colibri/Cargo.toml"},
+		{Name: "starling", Dir: ".", Argv: []string{"cargo", "build", "--locked", "-p", "starling", "--manifest-path", "crates/Cargo.toml"}, SkipIfAbsent: "crates/Cargo.toml"},
 	}
 }
 
@@ -56,6 +70,21 @@ func Run(ctx context.Context, worktree string, opts Opts) error {
 	if out == nil {
 		out = os.Stdout
 	}
+
+	// Drop steps whose subproject is absent from this base before doing
+	// anything else, so a missing `crates` workspace neither fails the run nor
+	// makes cargo look required in the PATH pre-flight below.
+	var active []Step
+	for _, s := range steps {
+		if s.SkipIfAbsent != "" {
+			if _, err := os.Stat(filepath.Join(worktree, s.SkipIfAbsent)); os.IsNotExist(err) {
+				fmt.Fprintf(out, "[%s] skipped: %s not present in this worktree\n", s.Name, s.SkipIfAbsent)
+				continue
+			}
+		}
+		active = append(active, s)
+	}
+	steps = active
 
 	// Pre-flight: every tool must be on PATH. Fail fast with an actionable
 	// message rather than a cryptic exec error mid-run.
