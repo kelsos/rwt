@@ -30,6 +30,13 @@ func run(ctx context.Context, dir string, args ...string) (string, error) {
 	return strings.TrimSpace(out.String()), nil
 }
 
+// RepoRoot returns the top-level directory of the git worktree containing dir.
+// It errors when dir is not inside a git repository, so callers resolving "."
+// can refuse rather than operate on an arbitrary cwd.
+func RepoRoot(ctx context.Context, dir string) (string, error) {
+	return run(ctx, dir, "rev-parse", "--show-toplevel")
+}
+
 // Fetch updates a remote from the host worktree.
 func Fetch(ctx context.Context, hostWorktree, remote string) error {
 	_, err := run(ctx, hostWorktree, "fetch", remote)

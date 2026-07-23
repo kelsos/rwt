@@ -30,13 +30,13 @@ func goCmd() *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeWorktreeNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runGo(cmd.OutOrStdout(), args[0])
+			return runGo(cmd.Context(), cmd.OutOrStdout(), args[0])
 		},
 	}
 }
 
-func runGo(out io.Writer, name string) error {
-	wt, err := resolveWorktree(name)
+func runGo(ctx context.Context, out io.Writer, name string) error {
+	wt, err := resolveWorktree(ctx, name)
 	if err != nil {
 		return err
 	}

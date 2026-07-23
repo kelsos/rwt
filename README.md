@@ -44,7 +44,7 @@ file > nothing. State is stored in `~/.config/rwt/config.json` (honoring
 
 ```
 rwt new   <name> --from <develop|bugfixes> [--type <prefix>] [--idea] [--force-managed-env] [--here]
-rwt setup <name|.>     # (re)warm uv/cargo/pnpm in an existing worktree
+rwt setup <name|.>     # (re)warm uv/cargo/pnpm in an existing worktree (. = repo root)
 rwt ls [--live]        # list worktrees + instance capability (--live: slot/port/running)
 rwt rm    <name> [--keep-branch] [--force] [--purge-memory]
 rwt rm    --merged [--yes] [--keep-branch] [--force]   # sweep merged worktrees

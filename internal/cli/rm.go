@@ -61,7 +61,7 @@ func rmCmd() *cobra.Command {
 }
 
 func runRm(ctx context.Context, name string, keepBranch, force, purgeMemory bool) error {
-	wt, err := resolveWorktree(name)
+	wt, err := resolveWorktree(ctx, name)
 	if err != nil {
 		return err
 	}

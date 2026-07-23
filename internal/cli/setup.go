@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"github.com/kelsos/rwt/internal/git"
 	"github.com/kelsos/rwt/internal/install"
 	"github.com/kelsos/rwt/internal/rotki"
 	"github.com/spf13/cobra"
@@ -18,7 +20,7 @@ func setupCmd() *cobra.Command {
 			"one or writing any env. Use '.' for the current directory.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			wt, err := resolveWorktree(args[0])
+			wt, err := resolveWorktree(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -32,10 +34,20 @@ func setupCmd() *cobra.Command {
 
 // resolveWorktree turns a name or "." into an absolute worktree path. A bare
 // name is looked up under the umbrella by matching the directory suffix, since
-// the on-disk dir carries the branch prefix (feat-/fix-/chore-/...).
-func resolveWorktree(arg string) (string, error) {
+// the on-disk dir carries the branch prefix (feat-/fix-/chore-/...). "." must be
+// inside a git repository and resolves to that repo's root, so running from a
+// subdirectory still targets the worktree rather than the cwd.
+func resolveWorktree(ctx context.Context, arg string) (string, error) {
 	if arg == "." {
-		return os.Getwd()
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		root, err := git.RepoRoot(ctx, cwd)
+		if err != nil {
+			return "", fmt.Errorf("%q is not inside a git repository: %w", cwd, err)
+		}
+		return root, nil
 	}
 	if filepath.IsAbs(arg) {
 		return arg, nil

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,7 +17,7 @@ func TestRunGo(t *testing.T) {
 
 	// Bare name resolves through the prefix variants.
 	var buf bytes.Buffer
-	if err := runGo(&buf, "dark-mode"); err != nil {
+	if err := runGo(context.Background(), &buf, "dark-mode"); err != nil {
 		t.Fatalf("runGo: %v", err)
 	}
 	want := "cd " + filepath.Join(umbrella, "feat-dark-mode") + "\n"
@@ -25,7 +26,7 @@ func TestRunGo(t *testing.T) {
 	}
 
 	// Unknown worktree errors instead of printing a bogus cd.
-	if err := runGo(&bytes.Buffer{}, "nope"); err == nil {
+	if err := runGo(context.Background(), &bytes.Buffer{}, "nope"); err == nil {
 		t.Error("runGo on a missing worktree should error")
 	}
 }
