@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/kelsos/rwt/internal/cargocache"
 )
 
 // Step is one ecosystem's deps-only command. Nothing here compiles.
@@ -24,31 +26,72 @@ type Step struct {
 	Dir  string   // working dir relative to the worktree root
 	Argv []string // command + args
 	// SkipIfAbsent, when set, is a path relative to the worktree root that must
-	// exist for the step to run. A step whose subproject is missing from the
-	// checked-out base (e.g. the `crates` workspace on an older `bugfixes`) is
-	// warned about and skipped rather than counted as a failure.
+	// exist for the step to run: a step whose subproject is missing from the
+	// checked-out base is warned about and skipped rather than counted as a
+	// failure. The default steps no longer need it (the Rust ones are derived
+	// from what the worktree actually contains), but it stays for Opts.Steps.
 	SkipIfAbsent string
+	// Before and After bracket Argv with bookkeeping that belongs to the step
+	// rather than to the run. Both are optional; After is skipped when the
+	// command failed, and neither failing fails the step, since a step whose
+	// command succeeded has already done the thing that was asked for.
+	Before func() error
+	After  func() error
 }
 
-// DefaultSteps are the ecosystem warmers. Every step is lockfile-based and
-// refuses to mutate its lockfile (pnpm --frozen-lockfile, uv --frozen, cargo
-// --locked). The two Rust warmers each get a full `cargo build` so the compiled
-// artifacts are warm and the first dev launch doesn't pay the cold-build cost;
-// the build implicitly fetches, so no separate fetch step is needed.
+// DefaultSteps are the ecosystem warmers for a worktree. Every step is
+// lockfile-based and refuses to mutate its lockfile (pnpm --frozen-lockfile, uv
+// --frozen, cargo --locked). The Rust warmers get a full `cargo build` so the
+// compiled artifacts are warm and the first dev launch doesn't pay the
+// cold-build cost; the build implicitly fetches, so no separate fetch step is
+// needed.
 //
-// colibri and starling live in separate cargo workspaces with separate target
-// dirs, so the builds run concurrently without contending on a target lock.
-// colibri is a single-package project; starling is the electron-mode supervisor
-// in the `crates` workspace, and `-p starling` pulls in starling-core and
-// starling-proxy (its path deps), matching what `pnpm dev:web` warms. Both Rust
-// steps SkipIfAbsent their manifest so a base that predates a subproject (e.g.
-// `crates` not yet on `bugfixes`) is warned about and skipped, not failed.
-func DefaultSteps() []Step {
-	return []Step{
+// The Rust steps come from cargocache.Workspaces, which detects the worktree's
+// layout: one root workspace covering colibri and starling on current bases, or
+// the older split colibri/crates pair on bases that predate it. A base with
+// neither simply gets no Rust step. Where there are two workspaces they have
+// separate target dirs, so the builds run concurrently without contending on a
+// target lock.
+//
+// Each Rust step runs with the workspace root as its cwd rather than pointing
+// --manifest-path at it from the worktree root. That is what lets cargo find the
+// generated .cargo/config.toml: discovery walks up from the cwd, so a config at
+// the workspace root is only seen from inside it.
+func DefaultSteps(worktree string) []Step {
+	steps := []Step{
 		{Name: "pnpm", Dir: "frontend", Argv: []string{"pnpm", "install", "--frozen-lockfile", "--prefer-offline"}},
 		{Name: "uv", Dir: ".", Argv: []string{"uv", "sync", "--frozen"}},
-		{Name: "colibri", Dir: ".", Argv: []string{"cargo", "build", "--locked", "--manifest-path", "colibri/Cargo.toml"}, SkipIfAbsent: "colibri/Cargo.toml"},
-		{Name: "starling", Dir: ".", Argv: []string{"cargo", "build", "--locked", "-p", "starling", "--manifest-path", "crates/Cargo.toml"}, SkipIfAbsent: "crates/Cargo.toml"},
+	}
+	for _, ws := range cargocache.Workspaces(worktree) {
+		steps = append(steps, cargoStep(worktree, ws))
+	}
+	return steps
+}
+
+// cargoStep is one workspace's warm build, bracketed by the bookkeeping that
+// keeps the built binaries findable from the worktree.
+//
+// rotki's dev launcher runs <worktree>/target/debug/<name> when it exists and
+// falls back to `cargo run` when it does not. Redirecting the target dir empties
+// that path, so every dev launch took the fallback: a visible "Compiling" at
+// `pnpm run dev`, and an extra cargo process in between starling and the service
+// it supervises. Clearing the shared uplift slot beforehand and symlinking the
+// resulting artifact afterwards restores the fast path.
+//
+// Both hooks are best-effort. Failing them costs the launcher shortcut, not the
+// build, and the fallback they exist to avoid is still correct.
+func cargoStep(worktree string, ws cargocache.Workspace) Step {
+	return Step{
+		Name: ws.Name,
+		Dir:  ws.Dir,
+		Argv: ws.Build,
+		Before: func() error {
+			return cargocache.PrepareBuild(worktree, ws)
+		},
+		After: func() error {
+			_, err := cargocache.LinkBins(worktree, ws)
+			return err
+		},
 	}
 }
 
@@ -64,7 +107,7 @@ type Opts struct {
 func Run(ctx context.Context, worktree string, opts Opts) error {
 	steps := opts.Steps
 	if steps == nil {
-		steps = DefaultSteps()
+		steps = DefaultSteps(worktree)
 	}
 	out := opts.Stdout
 	if out == nil {
@@ -113,11 +156,26 @@ func Run(ctx context.Context, worktree string, opts Opts) error {
 		wg.Add(1)
 		go func(s Step) {
 			defer wg.Done()
+			note := func(err error) {
+				if err == nil {
+					return
+				}
+				mu.Lock()
+				fmt.Fprintf(out, "[%s] note: %v\n", s.Name, err)
+				mu.Unlock()
+			}
+			if s.Before != nil {
+				note(s.Before())
+			}
 			if err := runStep(ctx, worktree, s, out, &mu); err != nil {
 				mu.Lock()
 				failed = append(failed, s.Name)
 				fmt.Fprintf(out, "[%s] FAILED: %v\n", s.Name, err)
 				mu.Unlock()
+				return
+			}
+			if s.After != nil {
+				note(s.After())
 			}
 		}(s)
 	}

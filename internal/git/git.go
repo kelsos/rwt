@@ -37,6 +37,13 @@ func RepoRoot(ctx context.Context, dir string) (string, error) {
 	return run(ctx, dir, "rev-parse", "--show-toplevel")
 }
 
+// CommonDir returns the repository's common git dir as an absolute path. Every
+// linked worktree shares it, so anything written there (info/exclude) applies
+// to all of them at once.
+func CommonDir(ctx context.Context, worktree string) (string, error) {
+	return run(ctx, worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
+}
+
 // Fetch updates a remote from the host worktree.
 func Fetch(ctx context.Context, hostWorktree, remote string) error {
 	_, err := run(ctx, hostWorktree, "fetch", remote)

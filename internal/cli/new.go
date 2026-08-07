@@ -90,7 +90,10 @@ func runNew(ctx context.Context, name, from, typ string, idea, forceManagedEnv, 
 		}
 	}
 
-	// Step 4 — warm the language envs (capability-independent).
+	// Step 4 — warm the language envs (capability-independent). The cargo cache
+	// is wired first so the warm build populates the shared target dir rather
+	// than seeding a per-worktree one.
+	wireCargoCache(ctx, wtPath)
 	fmt.Println("warming envs (pnpm / uv / cargo)...")
 	if err := installRun(ctx, wtPath, install.Opts{}); err != nil {
 		// Fail-soft: the worktree exists; tell the user how to resume.

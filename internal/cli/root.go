@@ -58,6 +58,7 @@ func newRootCmd() *cobra.Command {
 		lsCmd(),
 		rmCmd(),
 		refreshCmd(),
+		cleanCmd(),
 		goCmd(),
 		configCmd(),
 		doctorCmd(),

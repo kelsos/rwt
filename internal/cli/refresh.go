@@ -37,6 +37,11 @@ func refreshCmd() *cobra.Command {
 				// place so a post-refresh restart doesn't log you out.
 				applyDevFlags(wt)
 
+				// Same reasoning for the shared cargo cache: wire it on every
+				// present base whether or not it fast-forwards, so a base that
+				// is dirty or diverged still stops recompiling from scratch.
+				wireCargoCache(ctx, wt)
+
 				dirty, _ := git.IsDirty(ctx, wt)
 				if dirty {
 					fmt.Printf("skip %s: dirty worktree\n", base)

@@ -49,11 +49,12 @@ rwt ls [--live]        # list worktrees + instance capability (--live: slot/port
 rwt rm    <name> [--keep-branch] [--force] [--purge-memory]
 rwt rm    --merged [--yes] [--keep-branch] [--force]   # sweep merged worktrees
 rwt refresh            # fetch + ff-only every long-lived base, warm cold ones
+rwt clean [name|.] [--dry-run] [--cache]   # reclaim per-worktree cargo target dirs
 rwt go    <name>       # print `cd <path>` into a worktree (eval it)
 rwt config             # show umbrella path + dev flags
 rwt config path <dir>  # set the rotki umbrella location
 rwt config <flag> on|off    # toggle a dev flag
-rwt doctor             # preflight sccache / tools / umbrella
+rwt doctor             # preflight tools / umbrella + cargo cache report
 rwt version            # print the rwt version (also `rwt --version`)
 rwt completion install [bash|zsh|fish]   # install/update shell completion
 ```
@@ -119,6 +120,112 @@ their line removed. These keys sit **outside** the app's `MANAGED_ENV_KEYS`, so
 that's what keeps `VITE_PERSIST_STORE` in place so a post-refresh restart doesn't
 log you out. The write is skipped when nothing would change, so it stays a no-op.
 
+## Shared cargo cache
+
+Every worktree points its cargo builds at one shared target dir per cargo
+workspace under `~/.cache/rwt/target/` (honoring `$XDG_CACHE_HOME`), so
+dependencies compile once and are reused everywhere. A fresh worktree only
+compiles rotki's own crates; switching back to one you already built is a no-op
+rather than a rebuild.
+
+The wiring is a generated `.cargo/config.toml` at each workspace root, not an env
+var, because the dev launch shells out to cargo itself
+(`frontend/scripts/dev/services.ts` builds from the worktree root). A config file
+is picked up by rwt's warm step *and* by the app's own cargo invocations,
+including ones started from an IDE. The generated paths are added to the repo's
+shared `info/exclude`, so they never show up in `git status`.
+
+**Placement is load-bearing.** Cargo discovers config by walking up from the
+*current working directory*, never from `--manifest-path`. A config under
+`colibri/` is invisible to a build launched from the worktree root, which is how
+both rwt and the app build, so the config always goes at the workspace root and
+rwt's own warm steps `cd` into it.
+
+The layout is detected per worktree, because it differs by base:
+
+| layout | shared dir | bases |
+| --- | --- | --- |
+| root `Cargo.toml` workspace (`colibri` + `crates/*` members) | `target/rotki` | current `develop` |
+| separate `colibri/` and `crates/` workspaces | `target/colibri`, `target/crates` | bases predating the merge |
+| `colibri/` only | `target/colibri` | older bases (`bugfixes`, `master`) |
+
+Rebasing a worktree across that boundary re-wires it and removes the config rwt
+wrote for the old layout, so a worktree never compiles into two caches at once.
+A hand-written `.cargo/config.toml` is never touched (rwt reports it and skips
+wiring that workspace rather than overwriting it).
+
+The detection is transitional: the root workspace becomes the baseline on every
+live base after the next rotki release, and the two fallback rows above go with
+it.
+
+`new`, `setup`, `refresh` and `clean` wire it automatically. If `sccache` is on
+`PATH` it is also set as the rustc wrapper, catching misses a target dir cannot
+(rustc upgrades, changed rustflags); its absence costs cache hits, not
+correctness.
+
+The one cost is contention: cargo takes an exclusive lock per target dir, so two
+worktrees building the *same* workspace at the same time serialise. That is a
+wait during compilation, not a failure.
+
+### Keeping the dev launcher off `cargo run`
+
+rotki's dev launcher runs `<worktree>/target/debug/<name>` when it exists and
+falls back to `cargo run` when it does not. Redirecting the target dir empties
+that path, so the fallback would fire on every launch: a visible "Compiling" at
+`pnpm run dev`, and an extra cargo process wedged between starling and the
+service it supervises.
+
+So after each warm build rwt symlinks that path at the worktree's own artifact in
+the shared cache:
+
+```
+develop/target/debug/colibri -> ~/.cache/rwt/target/rotki/debug/deps/colibri-288ac144823fe9e3
+```
+
+It links to the artifact under `deps/` rather than to `debug/colibri`, because
+that top-level path is a single hardlink slot every worktree shares and it
+belongs to whichever one built last. The `deps/` hash is derived from the
+worktree's manifest path, so it stays *this* worktree's artifact, and cargo
+rewrites it in place: the symlink never needs refreshing and can never serve a
+stale binary. Cargo only writes the slot when a build produces output, so rwt
+clears it before building — cargo re-links a missing slot even when nothing
+recompiles, which is what makes the artifact identifiable afterwards.
+
+If the artifact cannot be identified the link is skipped rather than guessed at,
+and the launcher takes its `cargo run` fallback: slower, still correct.
+
+One habit worth keeping on the root-workspace layout: build with `-p colibri -p
+starling`, the way rwt and `pnpm dev:web` both do. Selecting a subset changes
+cargo's feature unification, which re-fingerprints the shared deps — harmless,
+but it costs a rebuild each time you alternate, and now that the target dir is
+shared, everyone pays it.
+
+```sh
+rwt clean --dry-run    # what the per-worktree target dirs are still holding
+rwt clean              # wire every worktree, then remove the dirs it supersedes
+rwt clean login-crash  # limit it to one worktree
+rwt clean --cache      # also drop the shared dirs (full rebuild everywhere)
+```
+
+`clean` wires before removing by design: deleting a target dir from an unwired
+worktree would just trade disk for a cold rebuild. `rwt doctor` reports the
+shared cache size, any unwired workspaces, and how much disk the superseded
+per-worktree target dirs still hold.
+
+It removes only what cargo put in a target dir — its markers, its profile dirs,
+and the per-triple dirs a cross-compile leaves behind — and keeps two things that
+share the directory:
+
+- `target/backend`, the frozen python core the e2e run builds (`pyinstaller
+  --distpath target/backend`), which cargo never wrote and which is slow to
+  rebuild.
+- the launcher symlinks above, which cost no disk and still resolve afterwards.
+
+A `target` directory with no cargo markers in it is left alone entirely: the name
+is common enough that acting on it alone would eventually delete something that
+was never cargo's. `--dry-run` shares the same walk as the real run, so its
+number is a preview rather than an estimate.
+
 ## Bulk cleanup (`rwt rm --merged`)
 
 After a few PRs land, `rwt rm --merged` removes every non-long-lived worktree
@@ -164,8 +271,9 @@ hint — bash into `~/.local/share/bash-completion/completions`, fish into
 ## Status
 
 Feature-complete for its intended scope: worktree lifecycle (`new` / `setup` /
-`ls` / `rm` / `refresh`), `config`, `doctor`, shell completion, and the
-conveniences `--type`, `rwt go`, `ls --live`, and `rm --merged`.
+`ls` / `rm` / `refresh`), the shared cargo cache (`clean`), `config`, `doctor`,
+shell completion, and the conveniences `--type`, `rwt go`, `ls --live`, and
+`rm --merged`.
 
 Deliberately not planned (considered and dropped): `rwt pr` (just use `gh`), the
 `rm` process-kill backstop, branch-guard hook install (would need an upstream
@@ -177,6 +285,8 @@ on Linux open editor handles don't block worktree removal anyway.
 
 - `RWT_UMBRELLA` — path to the `rotki/rotki` umbrella. Takes precedence over the
   configured path; there is no built-in default (see **Configuration**).
+- `RWT_CARGO_CACHE` — root of the shared cargo target dirs. Takes precedence over
+  `$XDG_CACHE_HOME/rwt/target` and `~/.cache/rwt/target`.
 
 ## Development
 

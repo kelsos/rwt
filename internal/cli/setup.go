@@ -24,6 +24,7 @@ func setupCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			wireCargoCache(cmd.Context(), wt)
 			fmt.Printf("warming envs in %s...\n", wt)
 			err = install.Run(cmd.Context(), wt, install.Opts{})
 			applyDevFlags(wt)
