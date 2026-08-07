@@ -30,7 +30,8 @@ func cleanCmd() *cobra.Command {
 			"--cache additionally drops the shared target dirs themselves, for when\n" +
 			"the shared cache has grown past its worth or needs a hard reset. That\n" +
 			"one costs a full rebuild for every worktree, so it is never the default.",
-		Args: cobra.MaximumNArgs(1),
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeWorktreeNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runClean(cmd.Context(), args, dryRun, cache)
 		},
