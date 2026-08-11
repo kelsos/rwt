@@ -70,6 +70,55 @@ func TestLifecycle(t *testing.T) {
 	}
 }
 
+// TestRmMergedSweepsRebaseMerged covers the rebase-merge shape: the branch's
+// patch is upstream under a different SHA, so ancestry sees nothing and the
+// commits are on no remote. The sweep must still find and remove it.
+func TestRmMergedSweepsRebaseMerged(t *testing.T) {
+	clearGitEnv(t)
+	umbrella := setupUmbrella(t)
+	t.Setenv("RWT_UMBRELLA", umbrella)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	origInstall, origClean := installRun, devWebClean
+	installRun = func(context.Context, string, install.Opts) error { return nil }
+	devWebClean = func(context.Context, string, string) error { return nil }
+	t.Cleanup(func() { installRun, devWebClean = origInstall, origClean })
+
+	if err := runCLI(t, "new", "landed", "--from", "develop"); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	wt := filepath.Join(umbrella, "feat-landed")
+	writeFile(t, filepath.Join(wt, "landed.txt"), "the patch\n")
+	gitRun(t, wt, "add", "-A")
+	gitRun(t, wt, "commit", "-q", "-m", "the patch")
+
+	// Land the same patch upstream under a new SHA, never pushing the branch
+	// itself: exactly what a rebase merge leaves behind. develop has to move on
+	// first, or the cherry-pick replays onto the branch's own parent and
+	// reproduces the identical SHA, which is a fast-forward and not this case.
+	sha := gitOut(t, wt, "rev-parse", "HEAD")
+	develop := filepath.Join(umbrella, "develop")
+	writeFile(t, filepath.Join(develop, "unrelated.txt"), "moves develop on\n")
+	gitRun(t, develop, "add", "-A")
+	gitRun(t, develop, "commit", "-q", "-m", "unrelated")
+	gitRun(t, develop, "cherry-pick", sha)
+	if gitOut(t, develop, "rev-parse", "HEAD") == sha {
+		t.Fatal("precondition: the landed commit must have a different SHA")
+	}
+	gitRun(t, develop, "push", "-q", "upstream", "develop")
+	gitRun(t, develop, "fetch", "-q", "upstream")
+
+	if err := runCLI(t, "rm", "--merged", "--yes"); err != nil {
+		t.Fatalf("rm --merged: %v", err)
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Errorf("rebase-merged worktree still present: %v", err)
+	}
+	if branches := gitOut(t, develop, "branch", "--list", "feat/landed"); branches != "" {
+		t.Errorf("branch feat/landed not deleted: %q", branches)
+	}
+}
+
 // TestGuardRefusesWithoutUmbrella confirms umbrella-touching commands refuse
 // when no location is configured, while config/doctor stay usable.
 func TestGuardRefusesWithoutUmbrella(t *testing.T) {
@@ -181,6 +230,21 @@ func gitRun(t *testing.T, dir string, args ...string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
+}
+
+// gitOut is gitRun for commands whose trimmed stdout the test needs.
+func gitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func gitIdentity(t *testing.T, dir string) {

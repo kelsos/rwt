@@ -69,7 +69,7 @@ func runRm(ctx context.Context, name string, keepBranch, force, purgeMemory bool
 		return err
 	}
 	host := rotki.HostWorktreePath()
-	return tearDownWorktree(ctx, host, wt, branchForWorktree(ctx, host, wt), keepBranch, force, purgeMemory)
+	return tearDownWorktree(ctx, host, wt, branchForWorktree(ctx, host, wt), keepBranch, force, purgeMemory, false)
 }
 
 // runRmMerged removes every non-long-lived worktree whose branch is already
@@ -113,7 +113,7 @@ func runRmMerged(ctx context.Context, keepBranch, force, purgeMemory, yes bool) 
 
 	var firstErr error
 	for _, w := range merged {
-		if err := tearDownWorktree(ctx, host, w.Path, w.Branch, keepBranch, force, purgeMemory); err != nil {
+		if err := tearDownWorktree(ctx, host, w.Path, w.Branch, keepBranch, force, purgeMemory, true); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", filepath.Base(w.Path), err)
 			if firstErr == nil {
 				firstErr = err
@@ -123,11 +123,16 @@ func runRmMerged(ctx context.Context, keepBranch, force, purgeMemory, yes bool) 
 	return firstErr
 }
 
-// isMergedIntoUpstream reports whether the branch is fully contained in any
-// upstream long-lived base — i.e. the PR has landed and the worktree is stale.
+// isMergedIntoUpstream reports whether the branch has landed in any upstream
+// long-lived base, so the worktree is stale.
+//
+// Two ways to land: ancestry covers merge commits and fast-forwards, and patch
+// equivalence covers a rebase merge, where the same patches sit upstream under
+// new SHAs and ancestry sees nothing.
 func isMergedIntoUpstream(ctx context.Context, wt, branch string) bool {
 	for _, base := range rotki.LongLived {
-		if git.IsAncestor(ctx, wt, branch, rotki.Upstream+"/"+base) {
+		ref := rotki.Upstream + "/" + base
+		if git.IsAncestor(ctx, wt, branch, ref) || git.HasEquivalentUpstream(ctx, wt, branch, ref) {
 			return true
 		}
 	}
@@ -154,7 +159,13 @@ func branchForWorktree(ctx context.Context, host, wt string) string {
 // <name>` and `rm --merged`: long-lived guard, dirty/unpushed safety (unless
 // force), dev:web instance clean (if capable), worktree + branch removal, and
 // optional Claude-memory purge.
-func tearDownWorktree(ctx context.Context, host, wt, branch string, keepBranch, force, purgeMemory bool) error {
+//
+// merged means the caller has already confirmed the branch landed upstream. A
+// rebase-merged branch keeps its local SHAs, so both the unpushed check and
+// `git branch -d` would otherwise refuse work that is provably safe to drop.
+// The dirty check still applies: landed upstream says nothing about
+// uncommitted edits sitting in the worktree.
+func tearDownWorktree(ctx context.Context, host, wt, branch string, keepBranch, force, purgeMemory, merged bool) error {
 	base := filepath.Base(wt)
 
 	// Never remove a long-lived base.
@@ -167,7 +178,7 @@ func tearDownWorktree(ctx context.Context, host, wt, branch string, keepBranch, 
 		if dirty, _ := git.IsDirty(ctx, wt); dirty {
 			return fmt.Errorf("%s has uncommitted changes (use --force)", base)
 		}
-		if branch != "" && git.HasUnpushed(ctx, wt, branch) {
+		if branch != "" && !merged && git.HasUnpushed(ctx, wt, branch) {
 			return fmt.Errorf("%s has unpushed commits (use --force)", base)
 		}
 	}
@@ -191,7 +202,7 @@ func tearDownWorktree(ctx context.Context, host, wt, branch string, keepBranch, 
 	// Delete the local branch unless asked to keep it. Remote on origin is left
 	// untouched (PR history).
 	if !keepBranch && branch != "" {
-		if err := git.DeleteBranch(ctx, host, branch, force); err != nil {
+		if err := git.DeleteBranch(ctx, host, branch, force || merged); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not delete branch %s: %v\n", branch, err)
 		} else {
 			fmt.Printf("deleted branch %s\n", branch)

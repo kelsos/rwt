@@ -100,6 +100,29 @@ func IsAncestor(ctx context.Context, dir, ancestor, descendant string) bool {
 	return cmd.Run() == nil
 }
 
+// HasEquivalentUpstream reports whether every commit on branch already has a
+// patch-equivalent commit in upstreamRef. This is how a rebase-merged PR looks:
+// the same patches under new SHAs, which IsAncestor cannot see.
+//
+// Deliberately conservative, since a false positive deletes work: an empty
+// `git cherry` (branch adds nothing to upstream) yields false and is left to
+// the ancestry check, and a multi-commit branch squashed into one upstream
+// commit also yields false, because no individual patch-id matches the squash.
+func HasEquivalentUpstream(ctx context.Context, dir, branch, upstreamRef string) bool {
+	out, err := run(ctx, dir, "cherry", upstreamRef, branch)
+	if err != nil || out == "" {
+		return false
+	}
+	// One line per commit: "- <sha>" when an equivalent exists upstream,
+	// "+ <sha>" when it does not.
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "-") {
+			return false
+		}
+	}
+	return true
+}
+
 // Worktree is one entry from `git worktree list --porcelain`.
 type Worktree struct {
 	Path   string

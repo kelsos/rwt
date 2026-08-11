@@ -109,6 +109,83 @@ func TestHasUnpushed(t *testing.T) {
 	}
 }
 
+func TestHasEquivalentUpstream(t *testing.T) {
+	clearGitEnv(t)
+	dir := t.TempDir()
+	ctx := context.Background()
+	if _, err := run(ctx, dir, "init", "-b", "master"); err != nil {
+		t.Fatal(err)
+	}
+	commit(t, dir, "a.txt", "c0")
+
+	// rebased: one commit, replayed onto a moved master. Upstream holds the same
+	// patch under a different SHA, so ancestry fails but patch equivalence holds.
+	if _, err := run(ctx, dir, "checkout", "-b", "rebased"); err != nil {
+		t.Fatal(err)
+	}
+	commit(t, dir, "feature.txt", "the-patch")
+	if _, err := run(ctx, dir, "checkout", "master"); err != nil {
+		t.Fatal(err)
+	}
+	commit(t, dir, "other.txt", "moves master on")
+	if _, err := run(ctx, dir, "cherry-pick", "rebased"); err != nil {
+		t.Fatal(err)
+	}
+
+	if IsAncestor(ctx, dir, "rebased", "master") {
+		t.Fatal("precondition: a rebase-merged branch is not an ancestor")
+	}
+	if !HasEquivalentUpstream(ctx, dir, "rebased", "master") {
+		t.Error("rebase-merged branch should be detected as landed")
+	}
+
+	// wip: a genuinely unlanded commit must never be reported as merged.
+	if _, err := run(ctx, dir, "checkout", "-b", "wip", "master"); err != nil {
+		t.Fatal(err)
+	}
+	commit(t, dir, "wip.txt", "unlanded")
+	if HasEquivalentUpstream(ctx, dir, "wip", "master") {
+		t.Error("unlanded branch must not be reported as merged")
+	}
+
+	// partial: one landed patch plus one unlanded. All-or-nothing, so false.
+	if _, err := run(ctx, dir, "checkout", "-b", "partial", "rebased"); err != nil {
+		t.Fatal(err)
+	}
+	commit(t, dir, "extra.txt", "not upstream")
+	if HasEquivalentUpstream(ctx, dir, "partial", "master") {
+		t.Error("branch with one unlanded commit must not be reported as merged")
+	}
+
+	// Documented limit: two commits squashed into one upstream commit match no
+	// individual patch-id, so the branch reads as unlanded and is left in place.
+	if _, err := run(ctx, dir, "checkout", "-b", "squashed", "master"); err != nil {
+		t.Fatal(err)
+	}
+	commit(t, dir, "s1.txt", "s1")
+	commit(t, dir, "s2.txt", "s2")
+	if _, err := run(ctx, dir, "checkout", "master"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(ctx, dir, "merge", "--squash", "squashed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(ctx, dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "squash"); err != nil {
+		t.Fatal(err)
+	}
+	if HasEquivalentUpstream(ctx, dir, "squashed", "master") {
+		t.Error("multi-commit squash is not detected; guard against silently relaxing this")
+	}
+
+	// A branch adding nothing (empty `git cherry`) is left to the ancestry check.
+	if HasEquivalentUpstream(ctx, dir, "master", "master") {
+		t.Error("branch with no commits of its own should yield false")
+	}
+	if HasEquivalentUpstream(ctx, dir, "rebased", "does-not-exist") {
+		t.Error("missing upstream ref should yield false, not panic")
+	}
+}
+
 // clearGitEnv unsets the git env vars a parent `git commit` (e.g. the pre-commit
 // hook) exports, so a throwaway repo in this test isn't redirected at the real
 // one. Restored on cleanup.
