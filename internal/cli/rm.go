@@ -20,7 +20,9 @@ import (
 // devWebClean shells out to the app's instance teardown. A package var so tests
 // can stub it without a real pnpm project.
 var devWebClean = func(ctx context.Context, frontendDir, name string) error {
-	cmd := exec.CommandContext(ctx, "pnpm", "dev:web", "--clean", name)
+	// --yes: teardown is already decided by the time we get here, and the prompt
+	// defaults to No, which would silently strand the instance and its port slot.
+	cmd := exec.CommandContext(ctx, "pnpm", "dev:web", "--clean", name, "--yes")
 	cmd.Dir = frontendDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
