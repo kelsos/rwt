@@ -36,9 +36,10 @@ func rmCmd() *cobra.Command {
 		yes         bool
 	)
 	cmd := &cobra.Command{
-		Use:   "rm [name]",
-		Short: "Tear down a worktree (and its dev:web instance, branch)",
-		Args:  cobra.MaximumNArgs(1),
+		Use:               "rm [name]",
+		Short:             "Tear down a worktree (and its dev:web instance, branch)",
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: completeWorktreeNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if merged {
 				if len(args) > 0 {

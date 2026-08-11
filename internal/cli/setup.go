@@ -18,7 +18,8 @@ func setupCmd() *cobra.Command {
 		Short: "(Re)warm uv/cargo/pnpm in an existing worktree",
 		Long: "Runs the env installer against an existing worktree without creating\n" +
 			"one or writing any env. Use '.' for the current directory.",
-		Args: cobra.ExactArgs(1),
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeWorktreeNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wt, err := resolveWorktree(cmd.Context(), args[0])
 			if err != nil {
