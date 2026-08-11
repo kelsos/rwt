@@ -62,6 +62,53 @@ func TestIsAncestor(t *testing.T) {
 	}
 }
 
+func TestHasUnpushed(t *testing.T) {
+	clearGitEnv(t)
+	ctx := context.Background()
+
+	origin := t.TempDir()
+	if _, err := run(ctx, origin, "init", "--bare", "-b", "master"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if _, err := run(ctx, dir, "clone", origin, "."); err != nil {
+		t.Fatal(err)
+	}
+	commit(t, dir, "a.txt", "c0")
+	if _, err := run(ctx, dir, "push", "-u", "origin", "master"); err != nil {
+		t.Fatal(err)
+	}
+
+	// pushed: fully on the remote. wip: a local-only commit. In a real setup
+	// these live in sibling worktrees sharing this one repo.
+	if _, err := run(ctx, dir, "checkout", "-b", "pushed"); err != nil {
+		t.Fatal(err)
+	}
+	commit(t, dir, "b.txt", "c1")
+	if _, err := run(ctx, dir, "push", "-u", "origin", "pushed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(ctx, dir, "checkout", "-b", "wip", "master"); err != nil {
+		t.Fatal(err)
+	}
+	commit(t, dir, "c.txt", "c2")
+
+	// The regression: an unpushed `wip` elsewhere in the repo must not make a
+	// fully-pushed branch look unpushed.
+	if HasUnpushed(ctx, dir, "pushed") {
+		t.Error("pushed branch should not report unpushed commits")
+	}
+	if !HasUnpushed(ctx, dir, "wip") {
+		t.Error("wip branch should report unpushed commits")
+	}
+	if HasUnpushed(ctx, dir, "") {
+		t.Error("empty branch should yield false, not scan the whole repo")
+	}
+	if HasUnpushed(ctx, dir, "does-not-exist") {
+		t.Error("missing ref should yield false")
+	}
+}
+
 // clearGitEnv unsets the git env vars a parent `git commit` (e.g. the pre-commit
 // hook) exports, so a throwaway repo in this test isn't redirected at the real
 // one. Restored on cleanup.

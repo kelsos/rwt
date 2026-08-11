@@ -159,8 +159,12 @@ func IsDirty(ctx context.Context, worktree string) (bool, error) {
 // HasUnpushed reports whether the worktree's branch has commits not present on
 // any remote tracking ref. Best-effort: returns false if it cannot tell.
 func HasUnpushed(ctx context.Context, worktree, branch string) bool {
-	// Count commits on HEAD not reachable from any remote ref.
-	out, err := run(ctx, worktree, "log", "--branches", "--not", "--remotes", "--oneline", "-1")
+	if branch == "" {
+		return false
+	}
+	// Scoped to this branch: worktrees share one repo, so --branches would also
+	// count commits belonging to every other worktree's branch.
+	out, err := run(ctx, worktree, "log", branch, "--not", "--remotes", "--oneline", "-1")
 	if err != nil {
 		return false
 	}
