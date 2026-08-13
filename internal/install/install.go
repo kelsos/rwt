@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -23,6 +24,7 @@ import (
 // Step is one ecosystem's deps-only command. Nothing here compiles.
 type Step struct {
 	Name string   // log prefix, e.g. "pnpm"
+	Eco  string   // ecosystem tag for Only, one of the Eco* constants
 	Dir  string   // working dir relative to the worktree root
 	Argv []string // command + args
 	// SkipIfAbsent, when set, is a path relative to the worktree root that must
@@ -59,8 +61,8 @@ type Step struct {
 // the workspace root is only seen from inside it.
 func DefaultSteps(worktree string) []Step {
 	steps := []Step{
-		{Name: "pnpm", Dir: "frontend", Argv: []string{"pnpm", "install", "--frozen-lockfile", "--prefer-offline"}},
-		{Name: "uv", Dir: ".", Argv: []string{"uv", "sync", "--frozen"}},
+		{Name: "pnpm", Eco: EcoPnpm, Dir: "frontend", Argv: []string{"pnpm", "install", "--frozen-lockfile", "--prefer-offline"}},
+		{Name: "uv", Eco: EcoUv, Dir: ".", Argv: []string{"uv", "sync", "--frozen"}},
 	}
 	for _, ws := range cargocache.Workspaces(worktree) {
 		steps = append(steps, cargoStep(worktree, ws))
@@ -83,6 +85,7 @@ func DefaultSteps(worktree string) []Step {
 func cargoStep(worktree string, ws cargocache.Workspace) Step {
 	return Step{
 		Name: ws.Name,
+		Eco:  EcoCargo,
 		Dir:  ws.Dir,
 		Argv: ws.Build,
 		Before: func() error {
@@ -93,6 +96,66 @@ func cargoStep(worktree string, ws cargocache.Workspace) Step {
 			return err
 		},
 	}
+}
+
+// Ecosystem tags, the stable selectors behind Only. A Rust step's Name varies
+// with the worktree's layout ("rotki" on the root workspace, "colibri" and
+// "crates" on the split one), so selecting by name would mean knowing which base
+// is checked out; the tag does not move.
+const (
+	EcoPnpm  = "pnpm"
+	EcoUv    = "uv"
+	EcoCargo = "cargo"
+)
+
+// ecoAliases maps what a user is likely to type to an ecosystem tag. The
+// per-service Rust names are here because "rebuild colibri" is how the work is
+// actually described, even though the build is per workspace and colibri and
+// starling share one on current bases.
+var ecoAliases = map[string]string{
+	"pnpm": EcoPnpm, "node": EcoPnpm, "frontend": EcoPnpm, "js": EcoPnpm,
+	"uv": EcoUv, "python": EcoUv, "py": EcoUv,
+	"cargo": EcoCargo, "rust": EcoCargo, "colibri": EcoCargo,
+	"starling": EcoCargo, "crates": EcoCargo,
+}
+
+// EcoSelectors are the accepted --only values, sorted, for help text and
+// completion.
+func EcoSelectors() []string {
+	out := make([]string, 0, len(ecoAliases))
+	for k := range ecoAliases {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Only narrows steps to the named ecosystems, preserving the original order. An
+// unrecognised selector is an error rather than a silent no-op, and so is a
+// selector that matches nothing in this worktree: both mean the caller asked for
+// work that will not happen, and a rebuild that quietly builds nothing is worse
+// than one that says why.
+func Only(steps []Step, selectors []string) ([]Step, error) {
+	want := map[string]bool{}
+	for _, sel := range selectors {
+		eco, ok := ecoAliases[strings.ToLower(strings.TrimSpace(sel))]
+		if !ok {
+			return nil, fmt.Errorf("unknown --only value %q (want one of: %s)",
+				sel, strings.Join(EcoSelectors(), ", "))
+		}
+		want[eco] = true
+	}
+	var out []Step
+	for _, s := range steps {
+		if want[s.Eco] {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("nothing to do: no %s step in this worktree",
+			strings.Join(selectors, "/"))
+	}
+	return out, nil
 }
 
 // Opts tunes a Run.

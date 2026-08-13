@@ -44,7 +44,7 @@ file > nothing. State is stored in `~/.config/rwt/config.json` (honoring
 
 ```
 rwt new   <name> --from <develop|bugfixes> [--type <prefix>] [--idea] [--force-managed-env] [--here]
-rwt setup <name|.>     # (re)warm uv/cargo/pnpm in an existing worktree (. = repo root)
+rwt setup <name|.> [--only <eco>]   # (re)warm uv/cargo/pnpm in a worktree (. = repo root)
 rwt ls [--live]        # list worktrees + instance capability (--live: slot/port/running)
 rwt rm    <name> [--keep-branch] [--force] [--purge-memory]
 rwt rm    --merged [--yes] [--keep-branch] [--force]   # sweep merged worktrees
@@ -193,6 +193,29 @@ recompiles, which is what makes the artifact identifiable afterwards.
 
 If the artifact cannot be identified the link is skipped rather than guessed at,
 and the launcher takes its `cargo run` fallback: slower, still correct.
+
+### Rebuilding one ecosystem (`setup --only`)
+
+After touching Rust, `--only` narrows a setup to just that ecosystem instead of
+re-running pnpm and uv alongside it:
+
+```sh
+rwt setup . --only cargo       # from inside the worktree
+rwt setup login-crash --only colibri
+rwt setup . --only pnpm,uv
+```
+
+Use this rather than running `cargo build` yourself: the step keeps the
+uplift-slot clearing and the artifact symlink described above, so the dev
+launcher keeps finding `target/debug/<name>`. A hand-run build leaves that path
+empty and quietly costs you the fallback.
+
+Selectors are ecosystem tags, not step names: `cargo`, `rust`, `colibri`,
+`starling` and `crates` all mean the same thing, which is what makes one command
+correct on both cargo layouts (the step is named `rotki` on the root workspace
+and `colibri`/`crates` on the split one). An unknown selector, or one this
+worktree has no step for, is an error rather than a run that builds nothing. A
+narrowed run skips the dev-flag write a full setup does.
 
 One habit worth keeping on the root-workspace layout: build with `-p colibri -p
 starling`, the way rwt and `pnpm dev:web` both do. Selecting a subset changes

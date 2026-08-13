@@ -115,3 +115,64 @@ func TestDefaultStepsFollowTheRootWorkspace(t *testing.T) {
 		t.Errorf("root-workspace step should build both members, got %q", joined)
 	}
 }
+
+// TestOnlySelectsByEcosystem is the point of the Eco tag: a Rust selector has to
+// keep working across both layouts, where the step's Name is "rotki" on one and
+// "colibri"/"crates" on the other.
+func TestOnlySelectsByEcosystem(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "Cargo.toml"), []byte("[workspace]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	split := t.TempDir()
+	for _, dir := range []string{"colibri", "crates"} {
+		if err := os.MkdirAll(filepath.Join(split, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(split, dir, "Cargo.toml"), []byte("[package]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tc := range []struct {
+		wt   string
+		want int
+	}{{root, 1}, {split, 2}} {
+		for _, sel := range []string{"cargo", "rust", "colibri", "starling"} {
+			got, err := Only(DefaultSteps(tc.wt), []string{sel})
+			if err != nil {
+				t.Fatalf("Only(%q): %v", sel, err)
+			}
+			if len(got) != tc.want {
+				t.Errorf("Only(%q) returned %d steps, want %d", sel, len(got), tc.want)
+			}
+			for _, s := range got {
+				if s.Argv[0] != "cargo" {
+					t.Errorf("Only(%q) included a non-cargo step %q", sel, s.Name)
+				}
+			}
+		}
+	}
+
+	got, err := Only(DefaultSteps(root), []string{"pnpm", "uv"})
+	if err != nil {
+		t.Fatalf("Only(pnpm, uv): %v", err)
+	}
+	if len(got) != 2 || got[0].Name != "pnpm" || got[1].Name != "uv" {
+		t.Errorf("Only(pnpm, uv) = %+v, want the two non-cargo steps in order", got)
+	}
+}
+
+// TestOnlyRejectsEmptySelections keeps a narrowed run from succeeding without
+// building anything: both a typo and an ecosystem this worktree lacks must say
+// so rather than exit 0.
+func TestOnlyRejectsEmptySelections(t *testing.T) {
+	wt := t.TempDir() // no Cargo.toml anywhere -> no cargo step
+
+	if _, err := Only(DefaultSteps(wt), []string{"cargo"}); err == nil {
+		t.Error("Only(cargo) on a worktree with no cargo workspace should error")
+	}
+	if _, err := Only(DefaultSteps(wt), []string{"carg"}); err == nil {
+		t.Error("Only should reject an unknown selector")
+	}
+}

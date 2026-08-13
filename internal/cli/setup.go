@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/kelsos/rwt/internal/git"
 	"github.com/kelsos/rwt/internal/install"
@@ -13,11 +14,18 @@ import (
 )
 
 func setupCmd() *cobra.Command {
-	return &cobra.Command{
+	var only []string
+	cmd := &cobra.Command{
 		Use:   "setup <name|.>",
 		Short: "(Re)warm uv/cargo/pnpm in an existing worktree",
 		Long: "Runs the env installer against an existing worktree without creating\n" +
-			"one or writing any env. Use '.' for the current directory.",
+			"one or writing any env. Use '.' for the current directory.\n\n" +
+			"--only narrows the run to one ecosystem, which is how you rebuild the\n" +
+			"Rust services after touching them: `rwt setup . --only cargo` runs the\n" +
+			"warm build with the same uplift-slot and symlink bookkeeping a full\n" +
+			"setup does, so the dev launcher keeps finding target/debug/<name>\n" +
+			"instead of falling back to `cargo run`. A narrowed run skips the dev\n" +
+			"flags, which a full setup still writes.",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeWorktreeNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -25,13 +33,30 @@ func setupCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			opts := install.Opts{}
+			if len(only) > 0 {
+				steps, err := install.Only(install.DefaultSteps(wt), only)
+				if err != nil {
+					return err
+				}
+				opts.Steps = steps
+			}
 			wireCargoCache(cmd.Context(), wt)
 			fmt.Printf("warming envs in %s...\n", wt)
-			err = install.Run(cmd.Context(), wt, install.Opts{})
-			applyDevFlags(wt)
+			err = install.Run(cmd.Context(), wt, opts)
+			if len(only) == 0 {
+				applyDevFlags(wt)
+			}
 			return err
 		},
 	}
+	cmd.Flags().StringSliceVar(&only, "only", nil,
+		"limit the run to these ecosystems: "+strings.Join(install.EcoSelectors(), ", "))
+	_ = cmd.RegisterFlagCompletionFunc("only",
+		func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+			return install.EcoSelectors(), cobra.ShellCompDirectiveNoFileComp
+		})
+	return cmd
 }
 
 // resolveWorktree turns a name or "." into an absolute worktree path. A bare
