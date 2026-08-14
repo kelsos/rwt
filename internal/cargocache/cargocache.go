@@ -453,6 +453,98 @@ func artifactFor(debug, bin string) string {
 	return ""
 }
 
+// PackageArgs turns binary names into the `-p <name>` pairs cargo takes, so a
+// caller can address exactly the packages it means.
+func PackageArgs(bins []string) []string {
+	args := make([]string, 0, len(bins)*2)
+	for _, bin := range bins {
+		args = append(args, "-p", bin)
+	}
+	return args
+}
+
+// StaleBins returns the workspace's binaries whose built artifact is older than
+// a source file it was compiled from.
+//
+// This exists because cargo can report a build fresh while its artifact is not.
+// The shared target dir is written by every worktree, and a package built from
+// two manifest roots (colibri as a workspace member and as its own workspace, as
+// the split layout still has it) keeps two artifacts whose fingerprints are
+// tracked separately. A build that resolves to the other one leaves this
+// worktree's artifact untouched and still reports "Finished", after which
+// LinkBins faithfully links a binary that predates the source. The dev launcher
+// prefers a prebuilt binary over `cargo run`, so the stale one is what runs, and
+// nothing says so: the service simply behaves like the code was never changed.
+//
+// The comparison uses cargo's own depfile (`<artifact>.d`), which lists every
+// source that went into the artifact, so it needs no cargo invocation and covers
+// whatever each binary actually depends on rather than a guess at its crate dir.
+// A binary with no artifact or no depfile yet is not stale, it is unbuilt.
+func StaleBins(worktree string, ws Workspace) ([]string, error) {
+	if !wired(worktree, ws) {
+		return nil, nil
+	}
+	target, err := TargetDir(ws)
+	if err != nil {
+		return nil, err
+	}
+	debug := filepath.Join(target, "debug")
+	var stale []string
+	for _, bin := range ws.Bins {
+		artifact := artifactFor(debug, bin)
+		if artifact == "" {
+			continue
+		}
+		built, err := os.Stat(artifact)
+		if err != nil {
+			continue
+		}
+		sources, err := depSources(artifact + ".d")
+		if err != nil || len(sources) == 0 {
+			continue
+		}
+		for _, source := range sources {
+			if !filepath.IsAbs(source) {
+				source = filepath.Join(worktree, source)
+			}
+			// A source that has since been deleted cannot be compared and is left
+			// to cargo, which fails the build rather than silently skipping it.
+			if info, err := os.Stat(source); err == nil && info.ModTime().After(built.ModTime()) {
+				stale = append(stale, bin)
+				break
+			}
+		}
+	}
+	return stale, nil
+}
+
+// depSources reads the source paths out of a cargo depfile.
+//
+// The format is make's: `<target>: <source> <source> ...`, with spaces inside a
+// path escaped as `\ `. Only the sources are wanted, and only from lines that
+// carry them: cargo also writes a bare `<source>:` line per dependency, which
+// would otherwise read as a target with no sources.
+func depSources(depfile string) ([]string, error) {
+	raw, err := os.ReadFile(depfile)
+	if err != nil {
+		return nil, err
+	}
+	var sources []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		_, rest, found := strings.Cut(line, ": ")
+		if !found {
+			continue
+		}
+		// Split on unescaped spaces, so a path containing one survives intact.
+		for _, field := range strings.Split(strings.ReplaceAll(rest, `\ `, "\x00"), " ") {
+			if path := strings.ReplaceAll(strings.TrimSpace(field), "\x00", " "); path != "" {
+				sources = append(sources, path)
+			}
+		}
+	}
+	return sources, nil
+}
+
 // Status is one present workspace's cache wiring in a worktree, for rwt doctor.
 type Status struct {
 	Name   string

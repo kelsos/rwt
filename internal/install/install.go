@@ -89,13 +89,48 @@ func cargoStep(worktree string, ws cargocache.Workspace) Step {
 		Dir:  ws.Dir,
 		Argv: ws.Build,
 		Before: func() error {
-			return cargocache.PrepareBuild(worktree, ws)
+			// Ahead of PrepareBuild, which removes the uplift slot the staleness
+			// check resolves this worktree's artifact through.
+			stale := dropStaleArtifacts(worktree, ws)
+			if err := cargocache.PrepareBuild(worktree, ws); err != nil {
+				return err
+			}
+			return stale
 		},
 		After: func() error {
 			_, err := cargocache.LinkBins(worktree, ws)
 			return err
 		},
 	}
+}
+
+// dropStaleArtifacts clears any binary whose artifact predates its own sources,
+// so the build that follows recompiles it instead of reporting Finished over it.
+//
+// cargo is the one deciding a build is fresh, and it can be wrong here: the
+// shared target dir holds an artifact per manifest root, and a build that
+// resolves to the other one leaves this worktree's untouched while still
+// succeeding. `cargo clean -p` is what invalidates it, since there is no flag to
+// force one package to rebuild. It clears that package across the shared cache,
+// so another worktree recompiles it once on its next warm build — the cost of
+// the alternative is a service running code that is not in the tree.
+//
+// Best-effort like the rest of the bookkeeping: if the check or the clean fails,
+// the build still runs and produces whatever cargo thinks is current.
+func dropStaleArtifacts(worktree string, ws cargocache.Workspace) error {
+	stale, err := cargocache.StaleBins(worktree, ws)
+	if err != nil || len(stale) == 0 {
+		return err
+	}
+	args := append([]string{"clean"}, cargocache.PackageArgs(stale)...)
+	cmd := exec.Command("cargo", args...)
+	cmd.Dir = filepath.Join(worktree, ws.Dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("rebuilding stale %s failed: %v: %s",
+			strings.Join(stale, ", "), err, strings.TrimSpace(string(out)))
+	}
+	return fmt.Errorf("rebuilding %s: its artifact was older than its sources",
+		strings.Join(stale, ", "))
 }
 
 // Ecosystem tags, the stable selectors behind Only. A Rust step's Name varies

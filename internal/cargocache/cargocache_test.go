@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // worktree builds a fake worktree with the shared cache root redirected into the
@@ -451,6 +452,106 @@ func TestLinkBinsLeavesAnUnwiredWorkspaceAlone(t *testing.T) {
 	}
 	if body, err := os.ReadFile(own); err != nil || string(body) != "the developer's own build" {
 		t.Errorf("the developer's own binary was touched: %q, %v", body, err)
+	}
+}
+
+// staleFixture wires a root-layout worktree with one built colibri artifact and
+// a depfile naming one source, and returns the worktree and that source's path.
+func staleFixture(t *testing.T) (wt, source string) {
+	t.Helper()
+	wt = worktree(t)
+	rootLayout(t, wt)
+	if _, err := Wire(wt); err != nil {
+		t.Fatal(err)
+	}
+	debug := sharedDebug(t, "colibri", "aaaa1111")
+	artifact := filepath.Join(debug, "deps", "colibri-aaaa1111")
+	source = filepath.Join(wt, "colibri", "src", "main.rs")
+	write(t, source, "fn main() {}\n")
+	write(t, artifact+".d", artifact+": colibri/src/main.rs\n")
+	return wt, source
+}
+
+// TestStaleBinsFlagsAnArtifactOlderThanItsSources is the case that made a change
+// to colibri never reach the running service: cargo reported the build fresh,
+// left this worktree's artifact untouched, and LinkBins linked it anyway. The
+// depfile is what makes the mismatch visible without asking cargo.
+func TestStaleBinsFlagsAnArtifactOlderThanItsSources(t *testing.T) {
+	wt, source := staleFixture(t)
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(source, later, later); err != nil {
+		t.Fatal(err)
+	}
+
+	stale, err := StaleBins(wt, rootWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 1 || stale[0] != "colibri" {
+		t.Fatalf("stale = %v, want [colibri]", stale)
+	}
+}
+
+// The common case must stay silent, or every warm build would clean and rebuild.
+func TestStaleBinsAcceptsAnArtifactNewerThanItsSources(t *testing.T) {
+	wt, source := staleFixture(t)
+	earlier := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(source, earlier, earlier); err != nil {
+		t.Fatal(err)
+	}
+
+	stale, err := StaleBins(wt, rootWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("stale = %v, want none", stale)
+	}
+}
+
+// A binary that was never built is not stale, it is absent: cleaning it would be
+// a no-op and reporting it would cry wolf on every fresh worktree.
+func TestStaleBinsIgnoresAnUnbuiltBin(t *testing.T) {
+	wt := worktree(t)
+	rootLayout(t, wt)
+	if _, err := Wire(wt); err != nil {
+		t.Fatal(err)
+	}
+
+	stale, err := StaleBins(wt, rootWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("stale = %v, want none", stale)
+	}
+}
+
+// Cargo writes a bare `<source>:` line per dependency alongside the real target
+// line, and escapes spaces inside a path. Reading those as sources would compare
+// mtimes against paths that do not exist and miss the ones that do.
+func TestDepSourcesReadsOnlyTheSourcesOfTargetLines(t *testing.T) {
+	dir := t.TempDir()
+	depfile := filepath.Join(dir, "colibri-aaaa1111.d")
+	write(t, depfile, strings.Join([]string{
+		"/cache/debug/deps/colibri-aaaa1111: colibri/src/main.rs colibri/src/api/my\\ mod.rs",
+		"colibri/src/main.rs:",
+		"colibri/src/api/my\\ mod.rs:",
+		"",
+	}, "\n"))
+
+	sources, err := depSources(depfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"colibri/src/main.rs", "colibri/src/api/my mod.rs"}
+	if len(sources) != len(want) {
+		t.Fatalf("sources = %v, want %v", sources, want)
+	}
+	for i := range want {
+		if sources[i] != want[i] {
+			t.Errorf("sources[%d] = %q, want %q", i, sources[i], want[i])
+		}
 	}
 }
 
