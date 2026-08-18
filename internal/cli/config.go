@@ -27,7 +27,8 @@ func configCmd() *cobra.Command {
 			"per worktree from the base it came off (develop->minor, bugfixes->patch).\n" +
 			"State is persisted to ~/.config/rwt/config.json and asserted into a\n" +
 			"worktree's .env.development.local on the next rwt new / setup / refresh.",
-		Args: cobra.MaximumNArgs(2),
+		Args:              cobra.MaximumNArgs(2),
+		ValidArgsFunction: completeConfigArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
 			if err != nil {
@@ -102,6 +103,35 @@ func runConfigPath(cfg config.Config, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: %s does not exist yet\n", abs)
 	}
 	return nil
+}
+
+// completeConfigArgs completes both positions of `rwt config`: the setting
+// name, then the value that setting takes. The settings do not share a value
+// vocabulary — a flag takes on|off, demo takes a mode, path takes a directory —
+// so the second position dispatches on the first.
+func completeConfigArgs(_ *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
+	switch len(args) {
+	case 0:
+		names := []string{"path", "demo"}
+		for _, f := range config.Flags {
+			names = append(names, f.Alias)
+		}
+		return names, cobra.ShellCompDirectiveNoFileComp
+	case 1:
+		switch args[0] {
+		case "path":
+			// A directory, so offer real ones; `path unset` is documented in
+			// help rather than completed, since mixing it into the list would
+			// suppress the directory filter.
+			return nil, cobra.ShellCompDirectiveFilterDirs
+		case "demo":
+			return config.DemoModes, cobra.ShellCompDirectiveNoFileComp
+		}
+		if _, ok := config.Lookup(args[0]); ok {
+			return []string{"on", "off"}, cobra.ShellCompDirectiveNoFileComp
+		}
+	}
+	return nil, cobra.ShellCompDirectiveNoFileComp
 }
 
 // registerDemoFlag adds the --demo override shared by new / setup / refresh.
