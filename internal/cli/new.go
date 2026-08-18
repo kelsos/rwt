@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/kelsos/rwt/internal/config"
 	"github.com/kelsos/rwt/internal/detect"
 	"github.com/kelsos/rwt/internal/envfile"
 	"github.com/kelsos/rwt/internal/git"
@@ -26,6 +27,7 @@ func newCmd() *cobra.Command {
 		idea            bool
 		forceManagedEnv bool
 		here            bool
+		demo            string
 	)
 	cmd := &cobra.Command{
 		Use:   "new <name>",
@@ -37,7 +39,14 @@ func newCmd() *cobra.Command {
 			"override it with --type to use any Conventional Commit type.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runNew(cmd.Context(), args[0], from, typ, idea, forceManagedEnv, here)
+			if demo != "" {
+				mode, err := config.ParseDemo(demo)
+				if err != nil {
+					return err
+				}
+				demo = mode
+			}
+			return runNew(cmd.Context(), args[0], from, typ, demo, idea, forceManagedEnv, here)
 		},
 	}
 	cmd.Flags().StringVar(&from, "from", "develop", "base worktree to branch off (develop|bugfixes)")
@@ -45,10 +54,11 @@ func newCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&idea, "idea", false, "open the worktree in IntelliJ IDEA")
 	cmd.Flags().BoolVar(&forceManagedEnv, "force-managed-env", false, "write INSTANCE_NAME even if the checkout looks unsupported")
 	cmd.Flags().BoolVar(&here, "here", false, "print a `cd <path>` snippet on stdout for eval")
+	registerDemoFlag(cmd, &demo)
 	return cmd
 }
 
-func runNew(ctx context.Context, name, from, typ string, idea, forceManagedEnv, here bool) error {
+func runNew(ctx context.Context, name, from, typ, demo string, idea, forceManagedEnv, here bool) error {
 	// --from picks the base to branch off (and the default prefix); --type, when
 	// set, overrides the prefix with any known Conventional Commit type.
 	prefix, ok := rotki.BranchPrefix[from]
@@ -118,8 +128,9 @@ func runNew(ctx context.Context, name, from, typ string, idea, forceManagedEnv, 
 		printNotCapableWarning(from, cap.Reason)
 	}
 
-	// Step 6 — assert the user's dev env flags (dev-tools / logs / persist).
-	applyDevFlags(wtPath)
+	// Step 6 — assert the user's dev env flags (dev-tools / logs / persist)
+	// and the demo mode.
+	applyDevFlags(ctx, wtPath, demo)
 
 	// Step 7 — optional IDEA launch.
 	if idea {

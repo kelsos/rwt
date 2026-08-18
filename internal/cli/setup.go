@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kelsos/rwt/internal/config"
 	"github.com/kelsos/rwt/internal/git"
 	"github.com/kelsos/rwt/internal/install"
 	"github.com/kelsos/rwt/internal/rotki"
@@ -14,7 +15,10 @@ import (
 )
 
 func setupCmd() *cobra.Command {
-	var only []string
+	var (
+		only []string
+		demo string
+	)
 	cmd := &cobra.Command{
 		Use:   "setup <name|.>",
 		Short: "(Re)warm uv/cargo/pnpm in an existing worktree",
@@ -25,11 +29,20 @@ func setupCmd() *cobra.Command {
 			"warm build with the same uplift-slot and symlink bookkeeping a full\n" +
 			"setup does, so the dev launcher keeps finding target/debug/<name>\n" +
 			"instead of falling back to `cargo run`. A narrowed run skips the dev\n" +
-			"flags, which a full setup still writes.",
+			"flags, which a full setup still writes — except an explicit --demo,\n" +
+			"which is always honored.",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeWorktreeNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			wt, err := resolveWorktree(cmd.Context(), args[0])
+			ctx := cmd.Context()
+			if demo != "" {
+				mode, err := config.ParseDemo(demo)
+				if err != nil {
+					return err
+				}
+				demo = mode
+			}
+			wt, err := resolveWorktree(ctx, args[0])
 			if err != nil {
 				return err
 			}
@@ -41,11 +54,14 @@ func setupCmd() *cobra.Command {
 				}
 				opts.Steps = steps
 			}
-			wireCargoCache(cmd.Context(), wt)
+			wireCargoCache(ctx, wt)
 			fmt.Printf("warming envs in %s...\n", wt)
-			err = install.Run(cmd.Context(), wt, opts)
-			if len(only) == 0 {
-				applyDevFlags(wt)
+			err = install.Run(ctx, wt, opts)
+			switch {
+			case len(only) == 0:
+				applyDevFlags(ctx, wt, demo)
+			case demo != "":
+				applyDemoOnly(ctx, wt, demo)
 			}
 			return err
 		},
@@ -56,6 +72,7 @@ func setupCmd() *cobra.Command {
 		func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
 			return install.EcoSelectors(), cobra.ShellCompDirectiveNoFileComp
 		})
+	registerDemoFlag(cmd, &demo)
 	return cmd
 }
 

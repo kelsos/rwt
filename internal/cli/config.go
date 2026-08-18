@@ -1,27 +1,32 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/kelsos/rwt/internal/config"
 	"github.com/kelsos/rwt/internal/envfile"
+	"github.com/kelsos/rwt/internal/git"
 	"github.com/kelsos/rwt/internal/rotki"
 	"github.com/spf13/cobra"
 )
 
 func configCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "config [path <dir> | <flag> on|off]",
-		Short: "Show or set the umbrella path and dev env flags",
+		Use:   "config [path <dir> | demo <mode> | <flag> on|off]",
+		Short: "Show or set the umbrella path, dev env flags and demo mode",
 		Long: "With no args, prints the configured rotki umbrella path and each dev flag.\n" +
 			"`rwt config path <dir>` sets the umbrella location (rwt assumes none until\n" +
-			"you do). `rwt config <flag> on|off` toggles a dev flag. State is persisted to\n" +
-			"~/.config/rwt/config.json; enabled flags are asserted into a worktree's\n" +
-			".env.development.local on the next rwt new / setup / refresh.",
+			"you do). `rwt config <flag> on|off` toggles a dev flag. `rwt config demo\n" +
+			"off|auto|minor|patch` sets the default " + rotki.DemoKey + "; auto derives it\n" +
+			"per worktree from the base it came off (develop->minor, bugfixes->patch).\n" +
+			"State is persisted to ~/.config/rwt/config.json and asserted into a\n" +
+			"worktree's .env.development.local on the next rwt new / setup / refresh.",
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
@@ -36,6 +41,9 @@ func configCmd() *cobra.Command {
 
 			if args[0] == "path" {
 				return runConfigPath(cfg, args[1:])
+			}
+			if args[0] == "demo" {
+				return runConfigDemo(cfg, args[1:])
 			}
 
 			flag, ok := config.Lookup(args[0])
@@ -96,6 +104,51 @@ func runConfigPath(cfg config.Config, args []string) error {
 	return nil
 }
 
+// registerDemoFlag adds the --demo override shared by new / setup / refresh.
+// An unset flag means "use the configured mode", which is why the zero value is
+// "" rather than config.DemoOff — passing --demo off must be distinguishable
+// from not passing it at all.
+func registerDemoFlag(cmd *cobra.Command, target *string) {
+	cmd.Flags().StringVar(target, "demo", "",
+		"override "+rotki.DemoKey+" for this run: "+strings.Join(config.DemoModes, "|")+
+			" (default: the configured mode)")
+	_ = cmd.RegisterFlagCompletionFunc("demo",
+		func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+			return config.DemoModes, cobra.ShellCompDirectiveNoFileComp
+		})
+}
+
+// runConfigDemo shows or sets the persisted demo mode.
+func runConfigDemo(cfg config.Config, args []string) error {
+	if len(args) == 0 {
+		fmt.Printf("demo: %s (%s)\n", cfg.Demo, rotki.DemoKey)
+		return nil
+	}
+	mode, err := config.ParseDemo(args[0])
+	if err != nil {
+		return err
+	}
+	cfg.Demo = mode
+	if err := config.Save(cfg); err != nil {
+		return err
+	}
+	fmt.Printf("demo (%s) -> %s\n", rotki.DemoKey, describeDemo(mode))
+	fmt.Println("applies on the next rwt new / setup / refresh")
+	return nil
+}
+
+// describeDemo spells out what a mode will write, since "auto" and "off" both
+// name a policy rather than a value.
+func describeDemo(mode string) string {
+	switch mode {
+	case config.DemoAuto:
+		return "auto (develop->minor, bugfixes->patch)"
+	case config.DemoOff:
+		return "off (key removed)"
+	}
+	return mode
+}
+
 func printConfig(cfg config.Config) {
 	if path, err := config.Path(); err == nil {
 		fmt.Printf("config: %s\n", path)
@@ -106,6 +159,8 @@ func printConfig(cfg config.Config) {
 	for _, f := range config.Flags {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", f.Alias, stateWord(cfg.Flags[f.Alias]), f.EnvKey, f.Desc)
 	}
+	fmt.Fprintf(tw, "demo\t%s\t%s\t%s\n", cfg.Demo, rotki.DemoKey,
+		"fake a released version (auto: develop->minor, bugfixes->patch)")
 	tw.Flush()
 }
 
@@ -152,16 +207,76 @@ func stateWord(on bool) string {
 	return "off"
 }
 
-// applyDevFlags loads the user's dev-flag config and upserts the flags into the
-// worktree's env. Fail-soft: it warns but never aborts the calling command, so
-// a config glitch can't block a worktree create/refresh.
-func applyDevFlags(wt string) {
+// applyDevFlags loads the user's dev-flag config and upserts the flags — plus
+// VITE_DEMO_MODE — into the worktree's env. demoOverride is the value of a
+// --demo flag, or "" to use the configured mode. Fail-soft: it warns but never
+// aborts the calling command, so a config glitch can't block a worktree
+// create/refresh.
+func applyDevFlags(ctx context.Context, wt, demoOverride string) {
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not load dev-flag config: %v\n", err)
 		return
 	}
-	if err := envfile.ApplyFlags(wt, cfg.EnvFlags()); err != nil {
+	values := make(map[string]string, len(config.Flags)+1)
+	for key, on := range cfg.EnvFlags() {
+		if on {
+			values[key] = "true"
+		} else {
+			values[key] = "" // removed, not written false
+		}
+	}
+	mode := cfg.Demo
+	if demoOverride != "" {
+		mode = demoOverride
+	}
+	values[rotki.DemoKey] = demoValue(ctx, wt, mode)
+
+	if err := envfile.ApplyValues(wt, values); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not apply dev flags to %s: %v\n", wt, err)
 	}
+}
+
+// applyDemoOnly writes just VITE_DEMO_MODE, leaving the boolean dev flags
+// alone. Used by the narrowed `setup --only` path, where an explicit --demo
+// should still land even though a narrowed run skips the flag pass.
+func applyDemoOnly(ctx context.Context, wt, mode string) {
+	if err := envfile.ApplyValues(wt, map[string]string{rotki.DemoKey: demoValue(ctx, wt, mode)}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not apply %s to %s: %v\n", rotki.DemoKey, wt, err)
+	}
+}
+
+// demoValue resolves a demo mode to the literal env value to write, "" meaning
+// remove the key. Only "auto" needs the worktree: it maps the base HEAD
+// branched off to the release that base ships.
+func demoValue(ctx context.Context, wt, mode string) string {
+	switch mode {
+	case config.DemoMinor, config.DemoPatch:
+		return mode
+	case config.DemoAuto:
+		base, ok := autoBase(ctx, wt)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "warning: demo auto: could not tell which base %s came off; leaving %s unset\n",
+				filepath.Base(wt), rotki.DemoKey)
+			return ""
+		}
+		value := rotki.DemoForBase(base)
+		if value == "" {
+			fmt.Fprintf(os.Stderr, "warning: demo auto: base %s has no release of its own; leaving %s unset\n",
+				base, rotki.DemoKey)
+		}
+		return value
+	}
+	return "" // off, or an empty/unknown mode
+}
+
+// autoBase resolves the base whose next release a worktree's work would ship
+// in. A checked-out long-lived base answers itself — master included, so that
+// `rwt refresh` reports "no release of its own" there instead of scoring master
+// against develop/bugfixes and picking whichever it happens to be nearer.
+func autoBase(ctx context.Context, wt string) (string, bool) {
+	if b := git.CurrentBranch(ctx, wt); slices.Contains(rotki.LongLived, b) {
+		return b, true
+	}
+	return git.NearestBase(ctx, wt, rotki.Upstream, rotki.DemoBases)
 }

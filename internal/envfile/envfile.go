@@ -15,17 +15,37 @@ import (
 	"github.com/kelsos/rwt/internal/rotki"
 )
 
-// ApplyFlags upserts rwt-owned dev flags into the worktree's
-// .env.development.local. For each key: enabled -> ensure KEY=true (replacing
-// any stale value, deduping repeats); disabled -> remove the line entirely.
-// Only the given keys are touched; every other line (and blank/comment line) is
-// preserved verbatim and in place. None of these keys are in the app's
-// MANAGED_ENV_KEYS, so the first `pnpm dev:web` leaves them alone.
+// ApplyFlags upserts rwt-owned boolean dev flags into the worktree's
+// .env.development.local: enabled -> KEY=true, disabled -> line removed. Thin
+// wrapper over ApplyValues, which carries the semantics.
+func ApplyFlags(worktree string, flags map[string]bool) error {
+	values := make(map[string]string, len(flags))
+	for key, on := range flags {
+		if on {
+			values[key] = "true"
+		} else {
+			values[key] = ""
+		}
+	}
+	return ApplyValues(worktree, values)
+}
+
+// ApplyValues upserts rwt-owned env keys into the worktree's
+// .env.development.local. For each key: a non-empty value -> ensure KEY=value
+// (replacing any stale value, deduping repeats); the empty value -> remove the
+// line entirely. Only the given keys are touched; every other line (and
+// blank/comment line) is preserved verbatim and in place. None of these keys
+// are in the app's MANAGED_ENV_KEYS, so the first `pnpm dev:web` leaves them
+// alone.
+//
+// Removal, not KEY=, is what "off" means: the app tests some of these with
+// `import.meta.env.KEY !== undefined` (VITE_DEMO_MODE), where an empty value
+// still reads as set.
 //
 // The write is skipped entirely when nothing would change, so re-running on an
 // already-correct worktree (the common `rwt refresh` case) is a clean no-op.
-func ApplyFlags(worktree string, flags map[string]bool) error {
-	if len(flags) == 0 {
+func ApplyValues(worktree string, values map[string]string) error {
+	if len(values) == 0 {
 		return nil
 	}
 	path := filepath.Join(worktree, rotki.EnvFileRel)
@@ -40,42 +60,42 @@ func ApplyFlags(worktree string, flags map[string]bool) error {
 		lines = strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 	}
 
-	handled := map[string]bool{} // enabled keys already satisfied in place
+	handled := map[string]bool{} // set keys already satisfied in place
 	changed := false
-	out := make([]string, 0, len(lines)+len(flags))
+	out := make([]string, 0, len(lines)+len(values))
 	for _, line := range lines {
 		key := lineKey(line)
-		want, managed := flags[key]
+		want, managed := values[key]
 		if key == "" || !managed {
 			out = append(out, line)
 			continue
 		}
-		if !want {
-			changed = true // disabled -> drop
+		if want == "" {
+			changed = true // off -> drop
 			continue
 		}
 		if handled[key] {
-			changed = true // drop duplicate of an enabled key
+			changed = true // drop duplicate of a set key
 			continue
 		}
 		handled[key] = true
-		desired := key + "=true"
+		desired := key + "=" + want
 		if strings.TrimSpace(line) != desired {
 			changed = true
 		}
 		out = append(out, desired)
 	}
 
-	// Append enabled keys not already present, in a stable order.
+	// Append set keys not already present, in a stable order.
 	var missing []string
-	for key, want := range flags {
-		if want && !handled[key] {
+	for key, want := range values {
+		if want != "" && !handled[key] {
 			missing = append(missing, key)
 		}
 	}
 	sort.Strings(missing)
 	for _, key := range missing {
-		out = append(out, key+"=true")
+		out = append(out, key+"="+values[key])
 		changed = true
 	}
 
