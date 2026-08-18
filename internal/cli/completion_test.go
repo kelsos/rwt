@@ -37,6 +37,48 @@ func TestCompletionConfigHome(t *testing.T) {
 	}
 }
 
+func TestCompleteConfigArgs(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		want      []string
+		wantDirs  bool
+		wantEmpty bool
+	}{
+		{name: "settings", args: nil, want: []string{"path", "demo", "dev-tools", "logs", "persist"}},
+		{name: "demo modes", args: []string{"demo"}, want: []string{"off", "auto", "minor", "patch"}},
+		{name: "flag states", args: []string{"logs"}, want: []string{"on", "off"}},
+		{name: "path takes a dir", args: []string{"path"}, wantDirs: true},
+		{name: "unknown setting", args: []string{"nope"}, wantEmpty: true},
+		{name: "past the last arg", args: []string{"demo", "auto"}, wantEmpty: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, directive := completeConfigArgs(nil, tc.args, "")
+			if tc.wantDirs {
+				if directive != cobra.ShellCompDirectiveFilterDirs {
+					t.Errorf("directive = %v, want FilterDirs", directive)
+				}
+				return
+			}
+			if tc.wantEmpty {
+				if len(got) != 0 {
+					t.Errorf("got %v, want no completions", got)
+				}
+				return
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i, want := range tc.want {
+				if got[i] != want {
+					t.Errorf("got[%d] = %q, want %q (full: %v)", i, got[i], want, got)
+				}
+			}
+		})
+	}
+}
+
 // fakeRoot is a minimal command that can generate completion scripts.
 func fakeRoot() *cobra.Command {
 	c := &cobra.Command{Use: "rwt"}

@@ -332,6 +332,13 @@ hint — bash into `~/.local/share/bash-completion/completions`, fish into
 `$XDG_CONFIG_HOME/fish/completions`. Re-run after upgrading rwt to refresh it.
 (`rwt completion <shell>` still just prints the script to stdout, à la Cobra.)
 
+Worktree names complete for `setup` / `rm` / `clean` / `go`; `rwt config`
+completes its setting names and then the values that setting takes (`on|off`
+for a flag, `off|auto|minor|patch` for `demo`, directories for `path`); and the
+`--only` / `--demo` flags complete their values. The installed script is a thin
+loader that asks the binary, so a rebuilt rwt updates completions without
+re-running the install.
+
 ## Status
 
 Feature-complete for its intended scope: worktree lifecycle (`new` / `setup` /
