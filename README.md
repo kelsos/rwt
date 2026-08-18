@@ -36,24 +36,26 @@ file > nothing. State is stored in `~/.config/rwt/config.json` (honoring
 ```json
 {
   "umbrella": "/home/you/development/repos/rotki/rotki",
-  "flags": { "dev-tools": true, "logs": true, "persist": true }
+  "flags": { "dev-tools": true, "logs": true, "persist": true },
+  "demo": "auto"
 }
 ```
 
 ## Commands
 
 ```
-rwt new   <name> --from <develop|bugfixes> [--type <prefix>] [--idea] [--force-managed-env] [--here]
-rwt setup <name|.> [--only <eco>]   # (re)warm uv/cargo/pnpm in a worktree (. = repo root)
+rwt new   <name> --from <develop|bugfixes> [--type <prefix>] [--demo <mode>] [--idea] [--force-managed-env] [--here]
+rwt setup <name|.> [--only <eco>] [--demo <mode>]   # (re)warm uv/cargo/pnpm in a worktree (. = repo root)
 rwt ls [--live]        # list worktrees + instance capability (--live: slot/port/running)
 rwt rm    <name> [--keep-branch] [--force] [--purge-memory]
 rwt rm    --merged [--yes] [--keep-branch] [--force]   # sweep merged worktrees
-rwt refresh            # fetch + ff-only every long-lived base, warm cold ones
+rwt refresh [--demo <mode>]   # fetch + ff-only every long-lived base, warm cold ones
 rwt clean [name|.] [--dry-run] [--cache]   # reclaim per-worktree cargo target dirs
 rwt go    <name>       # print `cd <path>` into a worktree (eval it)
 rwt config             # show umbrella path + dev flags
 rwt config path <dir>  # set the rotki umbrella location
 rwt config <flag> on|off    # toggle a dev flag
+rwt config demo <off|auto|minor|patch>   # set the default VITE_DEMO_MODE
 rwt doctor             # preflight tools / umbrella + cargo cache report
 rwt version            # print the rwt version (also `rwt --version`)
 rwt completion install [bash|zsh|fish]   # install/update shell completion
@@ -116,9 +118,48 @@ flag is on. Enabled flags are upserted into a worktree's
 their line removed. These keys sit **outside** the app's `MANAGED_ENV_KEYS`, so
 `dev:web` preserves them verbatim.
 
-`refresh` re-asserts the flags on every present long-lived base unconditionally —
+`refresh` re-asserts the flags on every present long-lived base unconditionally:
 that's what keeps `VITE_PERSIST_STORE` in place so a post-refresh restart doesn't
 log you out. The write is skipped when nothing would change, so it stays a no-op.
+
+## Demo mode (`VITE_DEMO_MODE`)
+
+`VITE_DEMO_MODE` makes the app report a released version instead of a dev one,
+so version-gated UI (the update banner, release-gated features) shows up in a
+dev build. The value picks which release to fake, and that depends on the base:
+develop ships the next **minor**, bugfixes ships the next **patch**.
+
+rwt writes the key for you. Four modes:
+
+| mode    | what lands in `.env.development.local`          |
+| ------- | ----------------------------------------------- |
+| `off`   | nothing — the line is removed (the default)      |
+| `auto`  | `minor` on develop-based, `patch` on bugfixes-based |
+| `minor` | `VITE_DEMO_MODE=minor` regardless of base        |
+| `patch` | `VITE_DEMO_MODE=patch` regardless of base        |
+
+Set it once, or override a single run:
+
+```sh
+rwt config demo auto            # persisted; every new/setup/refresh derives it
+rwt new checkout-flow --demo patch     # this worktree only
+rwt setup . --demo off          # drop it again
+```
+
+`--demo` beats the configured mode for that run. `off` **removes** the line
+rather than writing an empty value: the app tests
+`import.meta.env.VITE_DEMO_MODE !== undefined`, so `VITE_DEMO_MODE=` would still
+count as on. Like the dev flags, the key is outside both of the app's managed
+key sets, so `dev:web` leaves an rwt-written line alone.
+
+`auto` works out the base from history, not from the branch prefix: rotki has
+plenty of `fix/*` branches cut from develop, so the prefix tells you what kind of
+change it is, not what it was branched off. rwt scores each base by how many
+commits HEAD would add to it and takes the lowest, breaking ties by how far the
+fork point sits behind the base tip (which is what separates the two when
+bugfixes is fully merged into develop). A checked-out long-lived base answers
+itself; `master` has no release of its own to fake, so it gets nothing and says
+so.
 
 ## Shared cargo cache
 
@@ -295,8 +336,8 @@ hint — bash into `~/.local/share/bash-completion/completions`, fish into
 
 Feature-complete for its intended scope: worktree lifecycle (`new` / `setup` /
 `ls` / `rm` / `refresh`), the shared cargo cache (`clean`), `config`, `doctor`,
-shell completion, and the conveniences `--type`, `rwt go`, `ls --live`, and
-`rm --merged`.
+shell completion, and the conveniences `--type`, `--demo`, `rwt go`,
+`ls --live`, and `rm --merged`.
 
 Deliberately not planned (considered and dropped): `rwt pr` (just use `gh`), the
 `rm` process-kill backstop, branch-guard hook install (would need an upstream

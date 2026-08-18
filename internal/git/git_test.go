@@ -186,6 +186,88 @@ func TestHasEquivalentUpstream(t *testing.T) {
 	}
 }
 
+func TestNearestBase(t *testing.T) {
+	clearGitEnv(t)
+	dir := t.TempDir()
+	ctx := context.Background()
+	bases := []string{"develop", "bugfixes"}
+
+	if _, err := run(ctx, dir, "init", "-b", "develop"); err != nil {
+		t.Fatal(err)
+	}
+	commit(t, dir, "a.txt", "c0")
+
+	// Mirror rotki's shape: bugfixes forks off develop, gains its own commit,
+	// and is merged back, so its history is a strict subset of develop's. Only
+	// the merge-base *distance* separates the two.
+	mustRun(t, dir, "checkout", "-b", "bugfixes")
+	commit(t, dir, "b.txt", "b1")
+	mustRun(t, dir, "checkout", "develop")
+	mustRun(t, dir, "-c", "user.email=t@t", "-c", "user.name=t", "merge", "--no-ff", "-m", "merge", "bugfixes")
+	commit(t, dir, "d.txt", "d1")
+
+	for _, base := range []string{"develop", "bugfixes"} {
+		sha, err := run(ctx, dir, "rev-parse", base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustRun(t, dir, "update-ref", "refs/remotes/upstream/"+base, sha)
+	}
+
+	// A checked-out base answers itself without consulting merge-bases.
+	if got, ok := NearestBase(ctx, dir, "upstream", bases); !ok || got != "develop" {
+		t.Errorf("on develop: got %q (ok=%v), want develop", got, ok)
+	}
+
+	// Both of these are fix/* branches. The prefix says nothing about the base:
+	// only the fork point does.
+	mustRun(t, dir, "checkout", "-b", "fix/off-bugfixes", "bugfixes")
+	commit(t, dir, "f1.txt", "f1")
+	if got, ok := NearestBase(ctx, dir, "upstream", bases); !ok || got != "bugfixes" {
+		t.Errorf("fix branch off bugfixes: got %q (ok=%v), want bugfixes", got, ok)
+	}
+
+	mustRun(t, dir, "checkout", "-b", "fix/off-develop", "develop")
+	commit(t, dir, "f2.txt", "f2")
+	if got, ok := NearestBase(ctx, dir, "upstream", bases); !ok || got != "develop" {
+		t.Errorf("fix branch off develop: got %q (ok=%v), want develop", got, ok)
+	}
+
+	// No base ref resolves: report unknown rather than guessing a default.
+	if got, ok := NearestBase(ctx, dir, "nosuchremote", bases); ok {
+		t.Errorf("unknown remote: got %q (ok=true), want ok=false", got)
+	}
+
+	// Second shape, the everyday one: bugfixes has moved on since the merge, so
+	// neither base contains the other and the ahead-counts diverge sharply.
+	mustRun(t, dir, "checkout", "bugfixes")
+	commit(t, dir, "b2.txt", "b2")
+	sha, err := run(ctx, dir, "rev-parse", "bugfixes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "update-ref", "refs/remotes/upstream/bugfixes", sha)
+
+	mustRun(t, dir, "checkout", "-b", "fix/lagging-base", "bugfixes")
+	commit(t, dir, "f3.txt", "f3")
+	if got, ok := NearestBase(ctx, dir, "upstream", bases); !ok || got != "bugfixes" {
+		t.Errorf("branch off a diverged bugfixes: got %q (ok=%v), want bugfixes", got, ok)
+	}
+
+	mustRun(t, dir, "checkout", "-b", "feat/on-develop", "develop")
+	commit(t, dir, "f4.txt", "f4")
+	if got, ok := NearestBase(ctx, dir, "upstream", bases); !ok || got != "develop" {
+		t.Errorf("branch off develop while bugfixes is diverged: got %q (ok=%v), want develop", got, ok)
+	}
+}
+
+func mustRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	if _, err := run(context.Background(), dir, args...); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // clearGitEnv unsets the git env vars a parent `git commit` (e.g. the pre-commit
 // hook) exports, so a throwaway repo in this test isn't redirected at the real
 // one. Restored on cleanup.

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/kelsos/rwt/internal/config"
 	"github.com/kelsos/rwt/internal/git"
 	"github.com/kelsos/rwt/internal/install"
 	"github.com/kelsos/rwt/internal/rotki"
@@ -12,12 +13,20 @@ import (
 )
 
 func refreshCmd() *cobra.Command {
-	return &cobra.Command{
+	var demo string
+	cmd := &cobra.Command{
 		Use:   "refresh",
 		Short: "Fetch upstream and ff-only every long-lived base, warming cold ones",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			if demo != "" {
+				mode, err := config.ParseDemo(demo)
+				if err != nil {
+					return err
+				}
+				demo = mode
+			}
 			host := rotki.HostWorktreePath()
 
 			fmt.Printf("fetching %s...\n", rotki.Upstream)
@@ -35,7 +44,7 @@ func refreshCmd() *cobra.Command {
 				// Re-assert dev flags on every present base, independent of the
 				// ff/warm outcome below: this is what keeps VITE_PERSIST_STORE in
 				// place so a post-refresh restart doesn't log you out.
-				applyDevFlags(wt)
+				applyDevFlags(ctx, wt, demo)
 
 				// Same reasoning for the shared cargo cache: wire it on every
 				// present base whether or not it fast-forwards, so a base that
@@ -65,4 +74,6 @@ func refreshCmd() *cobra.Command {
 			return nil
 		},
 	}
+	registerDemoFlag(cmd, &demo)
+	return cmd
 }

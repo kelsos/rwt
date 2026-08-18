@@ -126,6 +126,40 @@ func TestApplyFlagsCreatesFile(t *testing.T) {
 	}
 }
 
+func TestApplyValues(t *testing.T) {
+	wt := t.TempDir()
+	envPath := filepath.Join(wt, rotki.EnvFileRel)
+	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seed := "VITE_DEMO_MODE=minor\nFOO=bar\n"
+	if err := os.WriteFile(envPath, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A non-boolean value replaces a stale one in place.
+	if err := ApplyValues(wt, map[string]string{"VITE_DEMO_MODE": "patch"}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	got := readFile(t, envPath)
+	if !strings.Contains(got, "VITE_DEMO_MODE=patch") || strings.Contains(got, "VITE_DEMO_MODE=minor") {
+		t.Errorf("value not replaced:\n%s", got)
+	}
+
+	// Off removes the line outright: the app reads `!== undefined`, so
+	// VITE_DEMO_MODE= would still count as on.
+	if err := ApplyValues(wt, map[string]string{"VITE_DEMO_MODE": ""}); err != nil {
+		t.Fatalf("off: %v", err)
+	}
+	got = readFile(t, envPath)
+	if strings.Contains(got, "VITE_DEMO_MODE") {
+		t.Errorf("off should remove the key entirely, not blank it:\n%s", got)
+	}
+	if !strings.Contains(got, "FOO=bar") {
+		t.Errorf("unmanaged content lost:\n%s", got)
+	}
+}
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)

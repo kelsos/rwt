@@ -90,6 +90,32 @@ const (
 	InputKey   = "INSTANCE_NAME"
 )
 
+// DemoKey fakes a released version so version-gated UI shows up in dev. The app
+// gates on `import.meta.env.VITE_DEMO_MODE !== undefined`, so "off" means the
+// line is absent — an empty value still reads as on. Documented as a commented
+// line in frontend/app/.env; it is in neither of the app's managed key sets, so
+// a line rwt writes survives every dev:web run.
+const DemoKey = "VITE_DEMO_MODE"
+
+// DemoBases are the bases a demo mode can be derived from, and the only
+// candidates base detection considers. master is excluded on purpose: it holds
+// the released version, so there is nothing for demo mode to fake, and leaving
+// it in the candidate set would let a release commit outscore the real base.
+var DemoBases = []string{"develop", "bugfixes"}
+
+// DemoForBase is the demo mode that matches the next release off a given base:
+// develop ships a minor, bugfixes ships a patch. Bases with no release of their
+// own return "" — nothing to fake.
+func DemoForBase(base string) string {
+	switch base {
+	case "develop":
+		return "minor"
+	case "bugfixes":
+		return "patch"
+	}
+	return ""
+}
+
 // Capability-detection paths, relative to a worktree root. The dev:web
 // multi-instance feature shipped as the dev-instance/ module split.
 const (

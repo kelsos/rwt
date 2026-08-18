@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -28,6 +29,75 @@ func run(ctx context.Context, dir string, args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
 	}
 	return strings.TrimSpace(out.String()), nil
+}
+
+// CurrentBranch returns the checked-out branch name in worktree, or "" when
+// HEAD is detached or the directory is not a repository.
+func CurrentBranch(ctx context.Context, worktree string) string {
+	branch, err := run(ctx, worktree, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil || branch == "HEAD" {
+		return ""
+	}
+	return branch
+}
+
+// NearestBase reports which of bases the worktree's HEAD most likely branched
+// from, resolving each as a `<remote>/<base>` ref. A checked-out base worktree
+// answers itself; otherwise it scores every base and takes the lowest. ok is
+// false when no base ref resolves.
+//
+// The score is how many commits HEAD would add to that base (`base..HEAD`),
+// i.e. how much of this history the base does not already have. On real rotki
+// worktrees the two bases are orders of magnitude apart on this measure: a
+// develop-cut branch is ~3 commits ahead of develop and ~1200 ahead of
+// bugfixes, because bugfixes lacks everything develop merged since they last
+// met.
+//
+// The tie-break is how far the fork point sits behind the base tip. It only
+// matters when the histories nest exactly — bugfixes fully merged into develop,
+// so a branch cut from the bugfixes tip adds the same commits to either — and
+// there the base that has nothing newer than the fork point is the real one.
+//
+// The branch prefix is deliberately not consulted: rotki carries plenty of
+// `fix/*` branches cut from develop, so the prefix says what kind of change it
+// is, not what it was branched off.
+func NearestBase(ctx context.Context, worktree, remote string, bases []string) (base string, ok bool) {
+	if b := CurrentBranch(ctx, worktree); b != "" {
+		for _, candidate := range bases {
+			if b == candidate {
+				return candidate, true
+			}
+		}
+	}
+	bestAhead, bestBehind := -1, -1
+	for _, candidate := range bases {
+		ref := remote + "/" + candidate
+		mergeBase, err := run(ctx, worktree, "merge-base", "HEAD", ref)
+		if err != nil {
+			continue // base not fetched, or unrelated history
+		}
+		ahead, err := countCommits(ctx, worktree, mergeBase, "HEAD")
+		if err != nil {
+			continue
+		}
+		behind, err := countCommits(ctx, worktree, mergeBase, ref)
+		if err != nil {
+			continue
+		}
+		if bestAhead < 0 || ahead < bestAhead || (ahead == bestAhead && behind < bestBehind) {
+			bestAhead, bestBehind, base, ok = ahead, behind, candidate, true
+		}
+	}
+	return base, ok
+}
+
+// countCommits returns the number of commits in from..to.
+func countCommits(ctx context.Context, dir, from, to string) (int, error) {
+	out, err := run(ctx, dir, "rev-list", "--count", from+".."+to)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(out)
 }
 
 // RepoRoot returns the top-level directory of the git worktree containing dir.
