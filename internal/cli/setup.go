@@ -18,6 +18,7 @@ func setupCmd() *cobra.Command {
 	var (
 		only []string
 		demo string
+		lint bool
 	)
 	cmd := &cobra.Command{
 		Use:   "setup <name|.>",
@@ -46,12 +47,18 @@ func setupCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			steps := install.DefaultSteps(wt)
+			if lint {
+				steps = install.StepsWithLint(wt)
+			}
 			opts := install.Opts{}
 			if len(only) > 0 {
-				steps, err := install.Only(install.DefaultSteps(wt), only)
+				narrowed, err := install.Only(steps, only)
 				if err != nil {
 					return err
 				}
+				opts.Steps = narrowed
+			} else if lint {
 				opts.Steps = steps
 			}
 			wireCargoCache(ctx, wt)
@@ -68,6 +75,8 @@ func setupCmd() *cobra.Command {
 	}
 	cmd.Flags().StringSliceVar(&only, "only", nil,
 		"limit the run to these ecosystems: "+strings.Join(install.EcoSelectors(), ", "))
+	cmd.Flags().BoolVar(&lint, "lint", false,
+		"also install the Python lint group (ruff/mypy/pylint), which `rwt check` needs")
 	_ = cmd.RegisterFlagCompletionFunc("only",
 		func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
 			return install.EcoSelectors(), cobra.ShellCompDirectiveNoFileComp

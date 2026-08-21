@@ -62,13 +62,38 @@ func ParseDemo(s string) (string, error) {
 	return "", fmt.Errorf("demo mode must be one of %s, got %q", strings.Join(DemoModes, "|"), s)
 }
 
+// HooksMode is how far the installed pre-push hook goes. pre-commit is always
+// the fast tier alone; this only tunes the slower gate.
+//
+//   - HooksStandard: lint, typecheck and the project-wide analyses.
+//   - HooksFull: the above plus unit tests narrowed to what changed.
+const (
+	HooksStandard = "standard"
+	HooksFull     = "full"
+)
+
+// HooksModes is the accepted set, in help/completion order.
+var HooksModes = []string{HooksFull, HooksStandard}
+
+// ParseHooks validates a user-supplied hooks mode, normalizing case.
+func ParseHooks(s string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(s))
+	for _, m := range HooksModes {
+		if v == m {
+			return m, nil
+		}
+	}
+	return "", fmt.Errorf("hooks mode must be one of %s, got %q", strings.Join(HooksModes, "|"), s)
+}
+
 // Config is the loaded user state: the rotki umbrella path override (empty means
-// "use the built-in default"), each known flag alias mapped to on/off, and the
-// demo mode.
+// "use the built-in default"), each known flag alias mapped to on/off, the demo
+// mode, and how far the pre-push hook goes.
 type Config struct {
 	Umbrella string          // rotki umbrella path override ("" = built-in default)
 	Flags    map[string]bool // keyed by alias
 	Demo     string          // one of DemoModes
+	Hooks    string          // one of HooksModes
 }
 
 // fileShape is the on-disk JSON layout, kept separate from Config so the public
@@ -77,6 +102,7 @@ type fileShape struct {
 	Umbrella string          `json:"umbrella,omitempty"`
 	Flags    map[string]bool `json:"flags"`
 	Demo     string          `json:"demo,omitempty"`
+	Hooks    string          `json:"hooks,omitempty"`
 }
 
 // Default returns the all-on baseline used when no file exists. These match the
@@ -87,7 +113,7 @@ func Default() Config {
 	for _, f := range Flags {
 		m[f.Alias] = true
 	}
-	return Config{Flags: m, Demo: DemoOff}
+	return Config{Flags: m, Demo: DemoOff, Hooks: HooksFull}
 }
 
 // Set toggles a flag by alias. Caller is expected to have validated the alias.
@@ -168,6 +194,9 @@ func Load() (Config, error) {
 	if demo, err := ParseDemo(onDisk.Demo); err == nil {
 		cfg.Demo = demo
 	}
+	if hooks, err := ParseHooks(onDisk.Hooks); err == nil {
+		cfg.Hooks = hooks
+	}
 	return cfg, nil
 }
 
@@ -181,9 +210,13 @@ func Save(cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	shape := fileShape{Umbrella: cfg.Umbrella, Flags: cfg.Flags, Demo: cfg.Demo}
+	shape := fileShape{Umbrella: cfg.Umbrella, Flags: cfg.Flags, Demo: cfg.Demo, Hooks: cfg.Hooks}
+	// Omit whatever matches the default, so the file stays as small as it was.
 	if shape.Demo == DemoOff {
-		shape.Demo = "" // omit the default so the file stays as it was
+		shape.Demo = ""
+	}
+	if shape.Hooks == HooksFull {
+		shape.Hooks = ""
 	}
 	data, err := json.MarshalIndent(shape, "", "  ")
 	if err != nil {

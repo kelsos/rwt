@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/kelsos/rwt/internal/config"
 )
@@ -127,6 +128,62 @@ func DemoForBase(base string) string {
 	}
 	return ""
 }
+
+// Change groups: which part of the repo a changed path belongs to. This is a
+// transcription of the `rotki/action-job-checker` config embedded in
+// .github/workflows/rotki_ci.yml, which is what CI uses to decide that a
+// frontend-only change need not run the backend suite. Keeping the same
+// boundaries is the whole point: a local gate that groups differently would
+// either run work CI skips or skip work CI runs.
+const (
+	GroupFrontend = "frontend"
+	GroupBackend  = "backend"
+	GroupColibri  = "colibri"
+	GroupStarling = "starling"
+	GroupDocs     = "docs"
+)
+
+// ChangeGroups maps a group to the path prefixes that put a file in it. A prefix
+// ending in "/" matches a directory subtree; anything else is an exact path. One
+// file can land in several groups, which is intended: Cargo.lock moves both Rust
+// groups.
+//
+// rotkehlchen/data/global.db sitting in the colibri group is not a slip. colibri
+// reads the packaged global database, and CI carries a comment recording that
+// leaving it out let a shipped asset break colibri for six days.
+var ChangeGroups = map[string][]string{
+	GroupFrontend: {"frontend/"},
+	GroupBackend:  {"rotkehlchen/", "rotkehlchen_mock/", "pyproject.toml", "package.py", "tools/"},
+	GroupColibri:  {"colibri/", "Cargo.toml", "Cargo.lock", "rotkehlchen/data/global.db"},
+	GroupStarling: {"crates/", "Cargo.toml", "Cargo.lock"},
+	GroupDocs:     {"docs/"},
+}
+
+// GroupsFor returns the groups a set of changed paths touches, in the stable
+// order of AllGroups.
+func GroupsFor(paths []string) []string {
+	hit := map[string]bool{}
+	for _, p := range paths {
+		for group, prefixes := range ChangeGroups {
+			for _, prefix := range prefixes {
+				if p == prefix || (strings.HasSuffix(prefix, "/") && strings.HasPrefix(p, prefix)) {
+					hit[group] = true
+					break
+				}
+			}
+		}
+	}
+	var out []string
+	for _, g := range AllGroups {
+		if hit[g] {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// AllGroups is the stable display/iteration order for groups.
+var AllGroups = []string{GroupFrontend, GroupBackend, GroupColibri, GroupStarling, GroupDocs}
 
 // Capability-detection paths, relative to a worktree root. The dev:web
 // multi-instance feature shipped as the dev-instance/ module split.

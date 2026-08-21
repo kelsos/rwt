@@ -45,8 +45,9 @@ func TestCompleteConfigArgs(t *testing.T) {
 		wantDirs  bool
 		wantEmpty bool
 	}{
-		{name: "settings", args: nil, want: []string{"path", "demo", "dev-tools", "logs", "persist"}},
+		{name: "settings", args: nil, want: []string{"path", "demo", "hooks", "dev-tools", "logs", "persist"}},
 		{name: "demo modes", args: []string{"demo"}, want: []string{"off", "auto", "minor", "patch"}},
+		{name: "hooks modes", args: []string{"hooks"}, want: []string{"full", "standard"}},
 		{name: "flag states", args: []string{"logs"}, want: []string{"on", "off"}},
 		{name: "path takes a dir", args: []string{"path"}, wantDirs: true},
 		{name: "unknown setting", args: []string{"nope"}, wantEmpty: true},

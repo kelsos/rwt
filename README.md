@@ -37,7 +37,8 @@ file > nothing. State is stored in `~/.config/rwt/config.json` (honoring
 {
   "umbrella": "/home/you/development/repos/rotki/rotki",
   "flags": { "dev-tools": true, "logs": true, "persist": true },
-  "demo": "auto"
+  "demo": "auto",
+  "hooks": "full"
 }
 ```
 
@@ -52,10 +53,13 @@ rwt rm    --merged [--yes] [--keep-branch] [--force]   # sweep merged worktrees
 rwt refresh [--demo <mode>]   # fetch + ff-only every long-lived base, warm cold ones
 rwt clean [name|.] [--dry-run] [--cache]   # reclaim per-worktree cargo target dirs
 rwt go    <name>       # print `cd <path>` into a worktree (eval it)
+rwt check [name|.] [--stage pre-commit|pre-push] [--full] [--dry-run]   # run the CI gates your change needs
+rwt hooks install|uninstall|status|off|on   # wire those gates into git
 rwt config             # show umbrella path + dev flags
 rwt config path <dir>  # set the rotki umbrella location
 rwt config <flag> on|off    # toggle a dev flag
 rwt config demo <off|auto|minor|patch>   # set the default VITE_DEMO_MODE
+rwt config hooks <full|standard>         # how far the pre-push gate goes
 rwt doctor             # preflight tools / umbrella + cargo cache report
 rwt version            # print the rwt version (also `rwt --version`)
 rwt completion install [bash|zsh|fish]   # install/update shell completion
@@ -178,6 +182,99 @@ itself rather than being scored, which during the release window is the only
 thing that keeps master and develop apart: master then contains develop's tip,
 and a full scoring tie falls back to candidate order, where develop and bugfixes
 come before master.
+
+## Local gates (`rwt check` / `rwt hooks`)
+
+CI decides which jobs to run from a `rotki/action-job-checker` config embedded in
+`.github/workflows/rotki_ci.yml`: a change under `frontend/` runs the frontend
+job, a change under `rotkehlchen/` runs backend lint and then the backend suite.
+`rwt check` runs the local half of that same decision, so you find out before the
+push instead of after it.
+
+```sh
+rwt check                        # the PR diff, lint + typecheck
+rwt check --stage pre-commit     # the index, fast checks only
+rwt check --full                 # add unit tests narrowed to what changed
+rwt check --dry-run              # print the plan and the groups, run nothing
+```
+
+`rwt hooks install` wires the same two plans into git as `pre-commit` and
+`pre-push`.
+
+### Tiers
+
+Tiers run in order and the run stops after the first tier that fails, so the
+cheap failure is the one you read.
+
+| tier | when | what |
+|---|---|---|
+| fast | pre-commit and pre-push | `typos`, `lint-staged` (ESLint + Stylelint), `ruff`, `double-indent`, `cargo fmt --check` |
+| standard | pre-push | `typecheck`, `knip`, `lint:style`, `check:linked-keys`, `test:proxy`, `mypy`, the diff-scoped logging lint, `cargo clippy` |
+| heavy | pre-push with `--full` | `vitest` and `pytest` narrowed to the changed files, `cargo test` |
+
+`knip` earns its place: it runs in CI and no local script invokes it, so an
+export used only inside its own file passes every gate you can run by hand and
+fails the PR. `pyright` and `pylint` are deliberately absent, since minutes over
+the whole tree is not a hook.
+
+The heavy tier never widens to a suite. A changed spec runs itself, a changed
+source file runs its sibling spec (or the specs beside it), a changed Python
+module runs its same-named test under `rotkehlchen/tests/`. Anything that maps to
+nothing is reported as skipped and left to CI. Set the pre-push depth once with
+`rwt config hooks full|standard`.
+
+### Scope
+
+`pre-commit` gates the index, because that is what the commit will contain.
+`pre-push` gates the PR diff (the merge-base against `upstream/<base>`, using the
+same base detection demo mode uses), so a re-push re-checks the whole PR rather
+than only the commits added since last time.
+
+### Detection, not assumption
+
+A check is only planned when the worktree can actually run it. The script set
+differs by base: `develop` and `master` have `knip`, `check:linked-keys`,
+`lint:file` and `test:proxy`; `bugfixes` has none of them. rwt reads the
+worktree's own `frontend/package.json`, its cargo layout, and its `.venv`, and
+reports what it skipped and why rather than running a command that is not there:
+
+```
+skip knip: frontend/package.json has no "knip" script on this base
+skip ruff: .venv/bin/ruff is not present in this worktree; install it with: rwt setup <worktree> --only uv --lint
+```
+
+That second one is worth knowing about: the Python lint tools are not part of the
+default `uv sync`, so a worktree warmed by `rwt new` has none of them. The checks
+gate on the tool being in the venv rather than letting `uv run` resolve it, so a
+commit never turns into a package install and never fails over a missing
+dependency instead of over your code. `rwt doctor` flags it too.
+
+### Install
+
+```sh
+rwt hooks install     # take over core.hooksPath
+rwt hooks status      # what is wired, and which worktrees are opted out
+rwt hooks off         # make the hooks inert in this worktree
+rwt hooks uninstall   # put back whatever core.hooksPath held before
+```
+
+Install is umbrella-wide because it has to be: `core.hooksPath` lives in the
+repository-local config, and every linked worktree shares one config file. The
+opt-out is therefore the per-worktree half: a marker inside that worktree's own
+git dir, so it is never a file in your tree, needs no `.gitignore` entry, and
+disappears when `rwt rm` removes the worktree.
+
+Whatever `core.hooksPath` held before is recorded, and rwt execs it after its own
+checks pass, so an existing mechanism keeps working underneath. Install refuses
+to displace a hooksPath that points at a directory which exists unless you pass
+`--force`. It is worth running `rwt hooks status` before installing: a
+`core.hooksPath` aimed at a directory that does not exist makes git run no hooks
+at all and say nothing about it, which is easy to end up with (running husky from
+the wrong cwd does it) and impossible to notice.
+
+The installed scripts are four-line shims that `exec rwt hooks run <stage>`, so
+upgrading rwt upgrades the checks. Bypass with git's own `--no-verify`, or
+`RWT_HOOKS=0` for the whole shell.
 
 ## Shared cargo cache
 
@@ -360,13 +457,14 @@ re-running the install.
 ## Status
 
 Feature-complete for its intended scope: worktree lifecycle (`new` / `setup` /
-`ls` / `rm` / `refresh`), the shared cargo cache (`clean`), `config`, `doctor`,
-shell completion, and the conveniences `--type`, `--demo`, `rwt go`,
-`ls --live`, and `rm --merged`.
+`ls` / `rm` / `refresh`), the shared cargo cache (`clean`), the local gates
+(`check` / `hooks`), `config`, `doctor`, shell completion, and the conveniences
+`--type`, `--demo`, `rwt go`, `ls --live`, and `rm --merged`.
 
 Deliberately not planned (considered and dropped): `rwt pr` (just use `gh`), the
-`rm` process-kill backstop, branch-guard hook install (would need an upstream
-Husky extension point), and `CLAUDE.local.md`/`WORKTREE.md` stamping. IntelliJ
+`rm` process-kill backstop, and `CLAUDE.local.md`/`WORKTREE.md` stamping. The
+gates stop short of e2e, the full test suites, `pyright`/`pylint`, and the docs
+build; those stay in CI, where the runners are not your laptop. IntelliJ
 project-close on `rm` is also out — the `idea` launcher has no `close` verb, and
 on Linux open editor handles don't block worktree removal anyway.
 
@@ -376,6 +474,8 @@ on Linux open editor handles don't block worktree removal anyway.
   configured path; there is no built-in default (see **Configuration**).
 - `RWT_CARGO_CACHE` — root of the shared cargo target dirs. Takes precedence over
   `$XDG_CACHE_HOME/rwt/target` and `~/.cache/rwt/target`.
+- `RWT_HOOKS=0` makes the installed git hooks a no-op for this shell, without
+  reaching for `--no-verify` on every command.
 
 ## Development
 

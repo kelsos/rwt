@@ -60,9 +60,25 @@ type Step struct {
 // generated .cargo/config.toml: discovery walks up from the cwd, so a config at
 // the workspace root is only seen from inside it.
 func DefaultSteps(worktree string) []Step {
+	return stepsWith(worktree, false)
+}
+
+// StepsWithLint is DefaultSteps with the Python lint group added to the uv sync,
+// so ruff, mypy and friends land in the worktree's .venv. They are not in the
+// default sync and are on nobody's PATH, which is why `rwt check` cannot lint
+// Python in a worktree warmed without this.
+func StepsWithLint(worktree string) []Step {
+	return stepsWith(worktree, true)
+}
+
+func stepsWith(worktree string, lint bool) []Step {
+	uv := []string{"uv", "sync", "--frozen"}
+	if lint {
+		uv = append(uv, "--group", "lint")
+	}
 	steps := []Step{
 		{Name: "pnpm", Eco: EcoPnpm, Dir: "frontend", Argv: []string{"pnpm", "install", "--frozen-lockfile", "--prefer-offline"}},
-		{Name: "uv", Eco: EcoUv, Dir: ".", Argv: []string{"uv", "sync", "--frozen"}},
+		{Name: "uv", Eco: EcoUv, Dir: ".", Argv: uv},
 	}
 	for _, ws := range cargocache.Workspaces(worktree) {
 		steps = append(steps, cargoStep(worktree, ws))

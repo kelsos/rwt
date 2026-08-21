@@ -116,6 +116,71 @@ func CommonDir(ctx context.Context, worktree string) (string, error) {
 	return run(ctx, worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
 }
 
+// Dir returns the worktree's OWN git dir as an absolute path: .git for the main
+// worktree, .git/worktrees/<name> for a linked one. Unlike CommonDir this is
+// per-worktree, so anything written there applies to that worktree alone and is
+// removed with it by `git worktree remove`.
+func Dir(ctx context.Context, worktree string) (string, error) {
+	return run(ctx, worktree, "rev-parse", "--path-format=absolute", "--git-dir")
+}
+
+// MergeBase returns the commit where HEAD and ref diverged.
+func MergeBase(ctx context.Context, worktree, ref string) (string, error) {
+	return run(ctx, worktree, "merge-base", "HEAD", ref)
+}
+
+// ConfigGet reads a repository-local config value. ok is false when the key is
+// unset, which git reports as exit status 1 rather than as output.
+func ConfigGet(ctx context.Context, worktree, key string) (value string, ok bool) {
+	v, err := run(ctx, worktree, "config", "--local", "--get", key)
+	if err != nil {
+		return "", false
+	}
+	return v, true
+}
+
+// ConfigSet writes a repository-local config value. Linked worktrees share one
+// config file, so this applies to every worktree in the umbrella at once.
+func ConfigSet(ctx context.Context, worktree, key, value string) error {
+	_, err := run(ctx, worktree, "config", "--local", key, value)
+	return err
+}
+
+// ConfigUnset removes a repository-local config key. Unsetting a key that is
+// already absent is not an error.
+func ConfigUnset(ctx context.Context, worktree, key string) error {
+	if _, ok := ConfigGet(ctx, worktree, key); !ok {
+		return nil
+	}
+	_, err := run(ctx, worktree, "config", "--local", "--unset", key)
+	return err
+}
+
+// StagedFiles lists the paths staged for commit, relative to the repo root.
+// Deletions are excluded: a check cannot lint a file that is no longer there.
+func StagedFiles(ctx context.Context, worktree string) ([]string, error) {
+	return nameOnly(ctx, worktree, "diff", "--cached", "--name-only", "--diff-filter=ACMR")
+}
+
+// DiffFiles lists the paths that differ between a base commit and HEAD, using
+// the `base...HEAD` form so commits the base gained since the fork point are not
+// counted as this branch's changes. This is the PR diff.
+func DiffFiles(ctx context.Context, worktree, base string) ([]string, error) {
+	return nameOnly(ctx, worktree, "diff", "--name-only", "--diff-filter=ACMR", base+"...HEAD")
+}
+
+// nameOnly runs a --name-only diff and splits it into paths.
+func nameOnly(ctx context.Context, worktree string, args ...string) ([]string, error) {
+	out, err := run(ctx, worktree, args...)
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
 // Fetch updates a remote from the host worktree.
 func Fetch(ctx context.Context, hostWorktree, remote string) error {
 	_, err := run(ctx, hostWorktree, "fetch", remote)

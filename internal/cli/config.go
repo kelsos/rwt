@@ -18,14 +18,15 @@ import (
 
 func configCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "config [path <dir> | demo <mode> | <flag> on|off]",
+		Use:   "config [path <dir> | demo <mode> | hooks <mode> | <flag> on|off]",
 		Short: "Show or set the umbrella path, dev env flags and demo mode",
 		Long: "With no args, prints the configured rotki umbrella path and each dev flag.\n" +
 			"`rwt config path <dir>` sets the umbrella location (rwt assumes none until\n" +
 			"you do). `rwt config <flag> on|off` toggles a dev flag. `rwt config demo\n" +
 			"off|auto|minor|patch` sets the default " + rotki.DemoKey + "; auto derives it\n" +
 			"per worktree from the base it came off (develop/master->minor,\n" +
-			"bugfixes->patch).\n" +
+			"bugfixes->patch). `rwt config hooks full|standard` sets how far the\n" +
+			"installed pre-push gate goes (see `rwt hooks`).\n" +
 			"State is persisted to ~/.config/rwt/config.json and asserted into a\n" +
 			"worktree's .env.development.local on the next rwt new / setup / refresh.",
 		Args:              cobra.MaximumNArgs(2),
@@ -46,6 +47,9 @@ func configCmd() *cobra.Command {
 			}
 			if args[0] == "demo" {
 				return runConfigDemo(cfg, args[1:])
+			}
+			if args[0] == "hooks" {
+				return runConfigHooks(cfg, args[1:])
 			}
 
 			flag, ok := config.Lookup(args[0])
@@ -113,7 +117,7 @@ func runConfigPath(cfg config.Config, args []string) error {
 func completeConfigArgs(_ *cobra.Command, args []string, _ string) ([]string, cobra.ShellCompDirective) {
 	switch len(args) {
 	case 0:
-		names := []string{"path", "demo"}
+		names := []string{"path", "demo", "hooks"}
 		for _, f := range config.Flags {
 			names = append(names, f.Alias)
 		}
@@ -127,6 +131,8 @@ func completeConfigArgs(_ *cobra.Command, args []string, _ string) ([]string, co
 			return nil, cobra.ShellCompDirectiveFilterDirs
 		case "demo":
 			return config.DemoModes, cobra.ShellCompDirectiveNoFileComp
+		case "hooks":
+			return config.HooksModes, cobra.ShellCompDirectiveNoFileComp
 		}
 		if _, ok := config.Lookup(args[0]); ok {
 			return []string{"on", "off"}, cobra.ShellCompDirectiveNoFileComp
@@ -168,6 +174,34 @@ func runConfigDemo(cfg config.Config, args []string) error {
 	return nil
 }
 
+// runConfigHooks shows or sets how far the installed pre-push hook goes. It
+// does not touch pre-commit, which is the fast tier by definition.
+func runConfigHooks(cfg config.Config, args []string) error {
+	if len(args) == 0 {
+		fmt.Printf("hooks: %s (%s)\n", cfg.Hooks, describeHooks(cfg.Hooks))
+		return nil
+	}
+	mode, err := config.ParseHooks(args[0])
+	if err != nil {
+		return err
+	}
+	cfg.Hooks = mode
+	if err := config.Save(cfg); err != nil {
+		return err
+	}
+	fmt.Printf("hooks -> %s (%s)\n", mode, describeHooks(mode))
+	fmt.Println("applies to the next pre-push; install them with `rwt hooks install`")
+	return nil
+}
+
+// describeHooks spells out what a pre-push will run.
+func describeHooks(mode string) string {
+	if mode == config.HooksFull {
+		return "pre-push adds unit tests narrowed to what changed"
+	}
+	return "pre-push stops at lint / typecheck"
+}
+
 // describeDemo spells out what a mode will write, since "auto" and "off" both
 // name a policy rather than a value.
 func describeDemo(mode string) string {
@@ -192,6 +226,7 @@ func printConfig(cfg config.Config) {
 	}
 	fmt.Fprintf(tw, "demo\t%s\t%s\t%s\n", cfg.Demo, rotki.DemoKey,
 		"fake a released version (auto: develop/master->minor, bugfixes->patch)")
+	fmt.Fprintf(tw, "hooks\t%s\t%s\t%s\n", cfg.Hooks, "-", describeHooks(cfg.Hooks))
 	tw.Flush()
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/kelsos/rwt/internal/cargocache"
 	"github.com/kelsos/rwt/internal/git"
+	"github.com/kelsos/rwt/internal/hooks"
 	"github.com/kelsos/rwt/internal/rotki"
 	"github.com/spf13/cobra"
 )
@@ -54,6 +55,7 @@ func doctorCmd() *cobra.Command {
 				check("host worktree present ("+rotki.HostWorktree+")", errHost == nil,
 					"expected umbrella at "+umbrella+" (source: "+source+")")
 				if errHost == nil {
+					reportHooks(cmd.Context())
 					reportCargoCache(cmd.Context())
 				}
 			}
@@ -64,6 +66,46 @@ func doctorCmd() *cobra.Command {
 			fmt.Println("\nall good.")
 			return nil
 		},
+	}
+}
+
+// reportHooks summarises the local gates. Informational rather than pass/fail:
+// not having them installed is a choice, not a fault. Two things here are worth
+// saying out loud because they fail silently otherwise: a core.hooksPath
+// pointing at a directory that does not exist runs no hooks and says nothing,
+// and a worktree whose .venv lacks the lint group skips every Python check.
+func reportHooks(ctx context.Context) {
+	host := rotki.HostWorktreePath()
+	state, err := hooks.Status(ctx, host)
+	if err != nil {
+		return
+	}
+	fmt.Println()
+	switch {
+	case state.Installed:
+		fmt.Printf("hooks: installed (%s)\n", state.Dir)
+	case state.HooksPath == "":
+		fmt.Println("hooks: not installed (install with: rwt hooks install)")
+	default:
+		fmt.Printf("hooks: not rwt's; core.hooksPath is %s\n", state.HooksPath)
+	}
+	if state.PreviousBroken {
+		path := state.HooksPath
+		if state.Installed {
+			path = state.Previous
+		}
+		fmt.Printf("       warning: %s does not exist, so it runs nothing\n", path)
+	}
+	for _, base := range rotki.LongLived {
+		wt := filepath.Join(rotki.UmbrellaRoot(), base)
+		if _, err := os.Stat(wt); err != nil {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(wt, ".venv", "bin", "ruff")); err != nil {
+			fmt.Printf("       %s has no Python lint group; `rwt check` will skip ruff/mypy there\n", base)
+			fmt.Printf("       fix with: rwt setup %s --only uv --lint\n", base)
+			break
+		}
 	}
 }
 
