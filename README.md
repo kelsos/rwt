@@ -16,8 +16,20 @@ registry.
 ## Install
 
 ```sh
-go build -o ~/.local/bin/rwt ./cmd/rwt
+make install        # builds into ~/.local/bin/rwt, version stamped from git
 ```
+
+Use `make` rather than a bare `go build`: Go records the commit in the build
+info but not the tag it sits on, so a plain build reports a bare SHA. The
+Makefile derives the version with `git describe --tags --dirty --always` and
+passes it at link time, which is why `rwt version` reads `v0.4.1-2-gabc1234`
+instead of `abc1234def56`.
+
+`make build` compiles into the working directory instead, `PREFIX=/usr/local
+make install` changes where it lands, and `make version` prints what a build
+would stamp without building. Building from a source archive with no git works
+too: pass `make install VERSION=v1.2.3`, or pass nothing and the binary falls
+back to the revision Go stamped into its build info.
 
 ## Configuration
 
@@ -486,7 +498,13 @@ git config core.hooksPath .githooks
 ```
 
 The `pre-commit` hook blocks a commit unless `gofmt`, `go vet`, `go test ./...`
-and `go build` all pass.
+and `go build` all pass. `make test` runs the same set by hand.
+
+Releasing is a tag: `git tag -a vX.Y.Z -m ...` then `make install`, and the
+binary reports the new version. The stamped variable is
+`internal/cli.version`; `-X` against a name that does not exist is silently
+ignored, so a rename there would quietly revert every build to a bare SHA.
+`TestResolveVersionPrefersTheStampedValue` exists to catch that.
 
 ## License
 
