@@ -44,7 +44,7 @@ file > nothing. State is stored in `~/.config/rwt/config.json` (honoring
 ## Commands
 
 ```
-rwt new   <name> --from <develop|bugfixes> [--type <prefix>] [--demo <mode>] [--idea] [--force-managed-env] [--here]
+rwt new   <name> --from <develop|bugfixes|master> [--type <prefix>] [--demo <mode>] [--idea] [--force-managed-env] [--here]
 rwt setup <name|.> [--only <eco>] [--demo <mode>]   # (re)warm uv/cargo/pnpm in a worktree (. = repo root)
 rwt ls [--live]        # list worktrees + instance capability (--live: slot/port/running)
 rwt rm    <name> [--keep-branch] [--force] [--purge-memory]
@@ -62,15 +62,15 @@ rwt completion install [bash|zsh|fish]   # install/update shell completion
 ```
 
 `new` creates `../<prefix>-<name>` off `upstream/<base>` (`develop`→`feat/…`,
-`bugfixes`→`fix/…`), warms the envs, then — only if the checkout supports it —
+`bugfixes`/`master`→`fix/…`), warms the envs, then — only if the checkout supports it —
 enables dev:web instance mode by appending `INSTANCE_NAME`. It is idempotent:
 re-run to resume after a failed step.
 
 ### Branch prefix (`--type`)
 
-The prefix defaults to the `--from` base (`develop`→`feat`, `bugfixes`→`fix`).
-Override it with `--type` (`-t`) to use any Conventional Commit type, keeping
-`--from` as the base to branch off:
+The prefix defaults to the `--from` base (`develop`→`feat`, `bugfixes` and
+`master`→`fix`). Override it with `--type` (`-t`) to use any Conventional Commit
+type, keeping `--from` as the base to branch off:
 
 ```sh
 rwt new dark-mode                       # ../feat-dark-mode  on feat/dark-mode
@@ -82,6 +82,20 @@ rwt new flaky-e2e  --type test --from bugfixes
 Accepted types: `feat`, `fix`, `chore`, `refactor`, `docs`, `test`, `perf`,
 `build`, `ci`, `style`, `revert`. `ls` / `setup` / `rm` resolve a worktree by
 bare name across all of these.
+
+### Branching off `master`
+
+`--from master` is for the release window: the stretch between develop being
+merged into master and the stable tag, where master is what the release is cut
+from and a blocker has to be fixed there.
+
+```sh
+rwt new rc-crash --from master          # ../fix-rc-crash on fix/rc-crash
+```
+
+Outside that window master is just the released code, and develop or bugfixes is
+the base you want. Nothing enforces the window (rwt cannot tell where in the
+release cycle you are), so picking the right base is on you.
 
 ## Capability detection
 
@@ -127,14 +141,16 @@ log you out. The write is skipped when nothing would change, so it stays a no-op
 `VITE_DEMO_MODE` makes the app report a released version instead of a dev one,
 so version-gated UI (the update banner, release-gated features) shows up in a
 dev build. The value picks which release to fake, and that depends on the base:
-develop ships the next **minor**, bugfixes ships the next **patch**.
+develop ships the next **minor**, bugfixes ships the next **patch**. master
+during the release window is holding that same minor un-tagged, so it counts as
+**minor** too.
 
 rwt writes the key for you. Four modes:
 
 | mode    | what lands in `.env.development.local`          |
 | ------- | ----------------------------------------------- |
 | `off`   | nothing — the line is removed (the default)      |
-| `auto`  | `minor` on develop-based, `patch` on bugfixes-based |
+| `auto`  | `minor` on develop/master-based, `patch` on bugfixes-based |
 | `minor` | `VITE_DEMO_MODE=minor` regardless of base        |
 | `patch` | `VITE_DEMO_MODE=patch` regardless of base        |
 
@@ -158,8 +174,10 @@ change it is, not what it was branched off. rwt scores each base by how many
 commits HEAD would add to it and takes the lowest, breaking ties by how far the
 fork point sits behind the base tip (which is what separates the two when
 bugfixes is fully merged into develop). A checked-out long-lived base answers
-itself; `master` has no release of its own to fake, so it gets nothing and says
-so.
+itself rather than being scored, which during the release window is the only
+thing that keeps master and develop apart: master then contains develop's tip,
+and a full scoring tie falls back to candidate order, where develop and bugfixes
+come before master.
 
 ## Shared cargo cache
 

@@ -54,9 +54,11 @@ func CurrentBranch(ctx context.Context, worktree string) string {
 // met.
 //
 // The tie-break is how far the fork point sits behind the base tip. It only
-// matters when the histories nest exactly — bugfixes fully merged into develop,
-// so a branch cut from the bugfixes tip adds the same commits to either — and
+// matters when the histories nest exactly (bugfixes fully merged into develop,
+// so a branch cut from the bugfixes tip adds the same commits to either) and
 // there the base that has nothing newer than the fork point is the real one.
+// A full tie keeps the earlier candidate, so callers order bases from most to
+// least specific.
 //
 // The branch prefix is deliberately not consulted: rotki carries plenty of
 // `fix/*` branches cut from develop, so the prefix says what kind of change it

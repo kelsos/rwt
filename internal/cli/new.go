@@ -35,8 +35,11 @@ func newCmd() *cobra.Command {
 		Long: "Creates ../<prefix>-<name> off upstream/<base>, warms uv/cargo/pnpm,\n" +
 			"and (if the checkout supports it) appends INSTANCE_NAME for dev:web\n" +
 			"instance mode. Idempotent: re-run to resume after a failed step.\n\n" +
-			"<prefix> defaults to the --from base (develop->feat, bugfixes->fix);\n" +
-			"override it with --type to use any Conventional Commit type.",
+			"<prefix> defaults to the --from base (develop->feat, bugfixes/master->fix);\n" +
+			"override it with --type to use any Conventional Commit type.\n\n" +
+			"--from master is for the release window only: the stretch between\n" +
+			"develop being merged into master and the stable tag, where a release\n" +
+			"blocker has to be fixed on master itself.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if demo != "" {
@@ -49,7 +52,11 @@ func newCmd() *cobra.Command {
 			return runNew(cmd.Context(), args[0], from, typ, demo, idea, forceManagedEnv, here)
 		},
 	}
-	cmd.Flags().StringVar(&from, "from", "develop", "base worktree to branch off (develop|bugfixes)")
+	cmd.Flags().StringVar(&from, "from", "develop", "base worktree to branch off ("+strings.Join(rotki.Bases, "|")+")")
+	_ = cmd.RegisterFlagCompletionFunc("from",
+		func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+			return rotki.Bases, cobra.ShellCompDirectiveNoFileComp
+		})
 	cmd.Flags().StringVarP(&typ, "type", "t", "", "branch prefix / Conventional Commit type (default: derived from --from)")
 	cmd.Flags().BoolVar(&idea, "idea", false, "open the worktree in IntelliJ IDEA")
 	cmd.Flags().BoolVar(&forceManagedEnv, "force-managed-env", false, "write INSTANCE_NAME even if the checkout looks unsupported")
@@ -63,7 +70,7 @@ func runNew(ctx context.Context, name, from, typ, demo string, idea, forceManage
 	// set, overrides the prefix with any known Conventional Commit type.
 	prefix, ok := rotki.BranchPrefix[from]
 	if !ok {
-		return fmt.Errorf("--from must be one of develop|bugfixes, got %q", from)
+		return fmt.Errorf("--from must be one of %s, got %q", strings.Join(rotki.Bases, "|"), from)
 	}
 	if typ != "" {
 		if !rotki.IsPrefix(typ) {
@@ -157,7 +164,7 @@ and the DEFAULT (shared) data dir — NO isolation.
 Options:
   - Run dev:web here only when no other instance is live.
   - Base this work on develop instead (--from develop).
-  - Backport the dev-instance feature to bugfixes, then re-run rwt new.
+  - Backport the dev-instance feature to %s, then re-run rwt new.
   - --force-managed-env to write the env vars anyway (NOT recommended).
-`, base, reason)
+`, base, reason, base)
 }

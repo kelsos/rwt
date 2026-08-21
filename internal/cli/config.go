@@ -24,7 +24,8 @@ func configCmd() *cobra.Command {
 			"`rwt config path <dir>` sets the umbrella location (rwt assumes none until\n" +
 			"you do). `rwt config <flag> on|off` toggles a dev flag. `rwt config demo\n" +
 			"off|auto|minor|patch` sets the default " + rotki.DemoKey + "; auto derives it\n" +
-			"per worktree from the base it came off (develop->minor, bugfixes->patch).\n" +
+			"per worktree from the base it came off (develop/master->minor,\n" +
+			"bugfixes->patch).\n" +
 			"State is persisted to ~/.config/rwt/config.json and asserted into a\n" +
 			"worktree's .env.development.local on the next rwt new / setup / refresh.",
 		Args:              cobra.MaximumNArgs(2),
@@ -172,7 +173,7 @@ func runConfigDemo(cfg config.Config, args []string) error {
 func describeDemo(mode string) string {
 	switch mode {
 	case config.DemoAuto:
-		return "auto (develop->minor, bugfixes->patch)"
+		return "auto (develop/master->minor, bugfixes->patch)"
 	case config.DemoOff:
 		return "off (key removed)"
 	}
@@ -190,7 +191,7 @@ func printConfig(cfg config.Config) {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", f.Alias, stateWord(cfg.Flags[f.Alias]), f.EnvKey, f.Desc)
 	}
 	fmt.Fprintf(tw, "demo\t%s\t%s\t%s\n", cfg.Demo, rotki.DemoKey,
-		"fake a released version (auto: develop->minor, bugfixes->patch)")
+		"fake a released version (auto: develop/master->minor, bugfixes->patch)")
 	tw.Flush()
 }
 
@@ -301,9 +302,9 @@ func demoValue(ctx context.Context, wt, mode string) string {
 }
 
 // autoBase resolves the base whose next release a worktree's work would ship
-// in. A checked-out long-lived base answers itself — master included, so that
-// `rwt refresh` reports "no release of its own" there instead of scoring master
-// against develop/bugfixes and picking whichever it happens to be nearer.
+// in. A checked-out long-lived base answers itself rather than being scored
+// against the others, which during the release window (master holding an
+// untagged develop merge) is the only thing that keeps the three apart.
 func autoBase(ctx context.Context, wt string) (string, bool) {
 	if b := git.CurrentBranch(ctx, wt); slices.Contains(rotki.LongLived, b) {
 		return b, true

@@ -25,6 +25,7 @@ func TestDemoMode(t *testing.T) {
 	t.Cleanup(func() { installRun = origInstall })
 
 	seedBugfixes(t, umbrella)
+	seedMaster(t, umbrella)
 
 	tests := []struct {
 		name string
@@ -34,6 +35,7 @@ func TestDemoMode(t *testing.T) {
 	}{
 		{name: "auto-develop", from: "develop", demo: "auto", want: "minor"},
 		{name: "auto-bugfixes", from: "bugfixes", demo: "auto", want: "patch"},
+		{name: "auto-master", from: "master", demo: "auto", want: "minor"},
 		{name: "pinned", from: "develop", demo: "patch", want: "patch"},
 		{name: "explicit-off", from: "develop", demo: "off", want: ""},
 		{name: "unset", from: "develop", demo: "", want: ""}, // config default is off
@@ -106,6 +108,25 @@ func seedBugfixes(t *testing.T, umbrella string) {
 	gitRun(t, develop, "push", "-q", "upstream", "develop")
 
 	gitRun(t, develop, "branch", "-q", "-D", "bugfixes")
+	gitRun(t, develop, "fetch", "-q", "upstream")
+}
+
+// seedMaster reproduces the release window: master carries develop's tip plus a
+// release-prep commit develop does not have yet, so a branch cut from master is
+// strictly nearer master than develop and base detection has something to tell
+// apart.
+func seedMaster(t *testing.T, umbrella string) {
+	t.Helper()
+	develop := filepath.Join(umbrella, "develop")
+
+	gitRun(t, develop, "checkout", "-q", "-b", "master")
+	writeFile(t, filepath.Join(develop, "version.txt"), "1.40.0\n")
+	gitRun(t, develop, "add", "-A")
+	gitRun(t, develop, "commit", "-q", "-m", "release prep")
+	gitRun(t, develop, "push", "-q", "upstream", "master")
+
+	gitRun(t, develop, "checkout", "-q", "develop")
+	gitRun(t, develop, "branch", "-q", "-D", "master")
 	gitRun(t, develop, "fetch", "-q", "upstream")
 }
 

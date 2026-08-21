@@ -259,6 +259,31 @@ func TestNearestBase(t *testing.T) {
 	if got, ok := NearestBase(ctx, dir, "upstream", bases); !ok || got != "develop" {
 		t.Errorf("branch off develop while bugfixes is diverged: got %q (ok=%v), want develop", got, ok)
 	}
+
+	// Third shape, the release window: master holds develop plus a release-prep
+	// commit, un-tagged, and is a legitimate base until the stable tag lands.
+	withMaster := []string{"develop", "bugfixes", "master"}
+	mustRun(t, dir, "checkout", "-b", "master", "develop")
+	commit(t, dir, "version.txt", "1.40.0")
+	sha, err = run(ctx, dir, "rev-parse", "master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "update-ref", "refs/remotes/upstream/master", sha)
+
+	mustRun(t, dir, "checkout", "-b", "fix/release-blocker", "master")
+	commit(t, dir, "f5.txt", "f5")
+	if got, ok := NearestBase(ctx, dir, "upstream", withMaster); !ok || got != "master" {
+		t.Errorf("branch off master: got %q (ok=%v), want master", got, ok)
+	}
+
+	// master containing develop's tip must not steal develop's branches: the two
+	// tie on ahead-count, and the tie-break plus candidate order keep develop.
+	mustRun(t, dir, "checkout", "-b", "feat/during-window", "develop")
+	commit(t, dir, "f6.txt", "f6")
+	if got, ok := NearestBase(ctx, dir, "upstream", withMaster); !ok || got != "develop" {
+		t.Errorf("branch off develop during the release window: got %q (ok=%v), want develop", got, ok)
+	}
 }
 
 func mustRun(t *testing.T, dir string, args ...string) {

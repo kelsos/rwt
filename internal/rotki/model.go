@@ -33,10 +33,20 @@ var LongLived = []string{"develop", "bugfixes", "master"}
 // BranchPrefix maps a --from base to the DEFAULT branch (and worktree-dir)
 // prefix. Bases not listed here are rejected by rwt new. The default is
 // overridable per-worktree with `rwt new --type` (see Prefixes).
+//
+// master is branchable for the release window only: between develop being
+// merged into master and the stable tag, a release blocker has to be fixed on
+// master itself. Outside that window master is just the released code and
+// develop/bugfixes are the right bases.
 var BranchPrefix = map[string]string{
 	"develop":  "feat",
 	"bugfixes": "fix",
+	"master":   "fix",
 }
+
+// Bases are the accepted --from values, in the order they are offered by shell
+// completion and named in errors.
+var Bases = []string{"develop", "bugfixes", "master"}
 
 // Prefixes are the conventional-commit types accepted as a branch/worktree
 // prefix via `rwt new --type`. feat/fix are also the defaults derived from
@@ -98,17 +108,19 @@ const (
 const DemoKey = "VITE_DEMO_MODE"
 
 // DemoBases are the bases a demo mode can be derived from, and the only
-// candidates base detection considers. master is excluded on purpose: it holds
-// the released version, so there is nothing for demo mode to fake, and leaving
-// it in the candidate set would let a release commit outscore the real base.
-var DemoBases = []string{"develop", "bugfixes"}
+// candidates base detection considers. master is last on purpose: NearestBase
+// keeps the first candidate on a tie, so a branch that scores identically
+// against master and its real base (which is what the release-window merge
+// makes common) stays attributed to develop/bugfixes.
+var DemoBases = []string{"develop", "bugfixes", "master"}
 
 // DemoForBase is the demo mode that matches the next release off a given base:
-// develop ships a minor, bugfixes ships a patch. Bases with no release of their
-// own return "" — nothing to fake.
+// develop ships a minor, bugfixes ships a patch. master ships the minor it is
+// holding un-tagged during the release window, so it answers minor too. Bases
+// with no release of their own return "" — nothing to fake.
 func DemoForBase(base string) string {
 	switch base {
-	case "develop":
+	case "develop", "master":
 		return "minor"
 	case "bugfixes":
 		return "patch"

@@ -38,7 +38,7 @@ var Flags = []Flag{
 //
 //   - DemoOff: never write the key (the default — demo mode changes the version
 //     string the app reports, so it stays opt-in).
-//   - DemoAuto: derive from the worktree's base — develop -> minor,
+//   - DemoAuto: derive from the worktree's base: develop and master -> minor,
 //     bugfixes -> patch, anything else -> off.
 //   - DemoMinor / DemoPatch: pin that value regardless of base.
 const (
