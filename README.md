@@ -343,8 +343,8 @@ that path, so the fallback would fire on every launch: a visible "Compiling" at
 `pnpm run dev`, and an extra cargo process wedged between starling and the
 service it supervises.
 
-So after each warm build rwt symlinks that path at the worktree's own artifact in
-the shared cache:
+So after each warm build rwt symlinks that path at the artifact the build
+produced in the shared cache:
 
 ```
 develop/target/debug/colibri -> ~/.cache/rwt/target/rotki/debug/deps/colibri-288ac144823fe9e3
@@ -352,12 +352,48 @@ develop/target/debug/colibri -> ~/.cache/rwt/target/rotki/debug/deps/colibri-288
 
 It links to the artifact under `deps/` rather than to `debug/colibri`, because
 that top-level path is a single hardlink slot every worktree shares and it
-belongs to whichever one built last. The `deps/` hash is derived from the
-worktree's manifest path, so it stays *this* worktree's artifact, and cargo
-rewrites it in place: the symlink never needs refreshing and can never serve a
-stale binary. Cargo only writes the slot when a build produces output, so rwt
-clears it before building — cargo re-links a missing slot even when nothing
-recompiles, which is what makes the artifact identifiable afterwards.
+belongs to whichever one built last. Cargo only writes the slot when a build
+produces output, so rwt clears it before building: cargo re-links a missing slot
+even when nothing recompiles, which is what makes the artifact identifiable
+afterwards.
+
+#### This does not isolate worktrees
+
+Earlier versions of this section claimed the `deps/` hash was derived from the
+worktree's manifest path, so the link could never serve another worktree's
+build. **That is false**, and it was measured rather than reasoned about:
+
+```
+develop/target/debug/colibri -> .../deps/colibri-029385afae5985ed
+master/target/debug/colibri  -> .../deps/colibri-029385afae5985ed   # same file
+```
+
+Those two worktrees had genuinely different colibri sources, and the shared
+cache held exactly one colibri artifact and one `.fingerprint` entry. Cargo
+records depfile paths **relative** to the workspace root (`colibri/src/main.rs`,
+not an absolute path), so two worktrees sharing a target dir are
+indistinguishable to it: one fingerprint namespace, one artifact, freshness
+decided on mtimes within it. Whichever worktree built last owns the binary, and
+every other worktree's symlink follows it.
+
+That is also why a build can fail against a symbol that exists only in a
+neighbour's tree. It is not the symlink misbehaving; it is cargo reusing a
+neighbour's compilation unit.
+
+`rwt doctor` detects and reports this, since nothing in cargo's own output
+mentions it:
+
+```
+[FAIL] 2 binaries shared across worktrees
+       colibri: develop, master
+       starling: develop, master
+```
+
+The workaround is to take one worktree out of the shared dir
+(`CARGO_TARGET_DIR=<cache>/rotki-<slug> pnpm run dev:web`). The real fix is
+per-worktree target dirs with a content-addressed cache (`sccache`) doing the
+sharing, since content addressing is exactly the property a shared target dir
+lacks. That inverts the premise of this feature, so it is not done yet.
 
 If the artifact cannot be identified the link is skipped rather than guessed at,
 and the launcher takes its `cargo run` fallback: slower, still correct.
