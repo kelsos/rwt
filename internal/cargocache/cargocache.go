@@ -380,12 +380,24 @@ func PrepareBuild(worktree string, ws Workspace) error {
 // built artifact in the shared cache, and returns the binaries it linked.
 //
 // It must be called after a build that PrepareBuild ran ahead of; that pairing
-// is what makes the uplift slot trustworthy. The link is made to the artifact
-// under deps/ rather than to the slot itself: the slot belongs to whichever
-// worktree built last, while the deps path carries a hash derived from this
-// worktree's manifest path and so stays this worktree's artifact across every
-// later rebuild. Cargo rewrites that path in place, so the symlink never needs
-// refreshing and can never serve a stale binary.
+// is what makes the uplift slot trustworthy at the moment it is read. The link
+// is made to the artifact under deps/ rather than to the slot, because the slot
+// is rewritten by every later build in any worktree, while the deps path at
+// least survives one.
+//
+// 🔴 This does NOT isolate worktrees, and an earlier version of this comment
+// claimed it did. Cargo's metadata hash is not derived from the worktree path:
+// it records depfile paths relative to the workspace root, so two worktrees
+// sharing a target dir are indistinguishable to it and collapse onto ONE
+// deps/<name>-<hash> artifact and one .fingerprint entry. Verified 2026-08-22 on
+// a real umbrella: develop and master had genuinely different colibri sources
+// and both resolved to colibri-029385afae5985ed. Whichever built last owns it,
+// and every worktree's symlink follows.
+//
+// Collisions returns the worktrees this affects, and `rwt doctor` reports them.
+// The real fix is per-worktree target dirs with a content-addressed cache
+// (sccache) doing the sharing, which is a change to the premise of this package
+// rather than to this function.
 //
 // A link that cannot be resolved is skipped rather than guessed at: the launcher
 // then falls back to `cargo run`, which is correct, just slower.
@@ -564,6 +576,77 @@ func Inspect(worktree string) []Status {
 		}
 		s.Stale = isCargoTarget(filepath.Join(worktree, ws.Dir, "target"))
 		out = append(out, s)
+	}
+	return out
+}
+
+// WorkspaceTargetOf recovers the workspace target dir an artifact lives under,
+// by trimming the debug/deps/<file> tail cargo puts it behind. Used to name a
+// concrete per-worktree target dir in the collision hint, so the suggestion is
+// a sibling of the real shared dir rather than a guess.
+func WorkspaceTargetOf(artifact string) string {
+	dir := filepath.Dir(artifact) // .../debug/deps
+	if filepath.Base(dir) != "deps" {
+		return "<cache-root>/<workspace>"
+	}
+	dir = filepath.Dir(dir) // .../debug
+	return filepath.Dir(dir)
+}
+
+// Collision is one built binary that several worktrees resolve to. Every
+// worktree in Worktrees runs the same file, whatever its own sources say, and
+// only one of them built it.
+type Collision struct {
+	Bin       string   // the binary, e.g. "colibri"
+	Artifact  string   // the shared deps/<name>-<hash> every link resolves to
+	Worktrees []string // worktree paths, in the order given
+}
+
+// Collisions reports binaries that more than one worktree resolves to.
+//
+// This is the observable half of the flaw described on LinkBins: a shared target
+// dir gives cargo one fingerprint namespace for every worktree using it, keyed
+// on paths relative to each workspace root, so worktrees with different sources
+// collapse onto one artifact. Nothing in the build says so, and the failure
+// looks like "my Rust change did not take effect" or a compile error citing a
+// symbol that exists only in a neighbour.
+//
+// Reported by symlink target rather than by comparing sources: resolving the
+// link is exact and costs a readlink, whereas "are these trees the same" is both
+// expensive and beside the point. Two worktrees on identical sources sharing a
+// binary is harmless today and still a collision waiting to bite the moment one
+// of them changes.
+func Collisions(worktrees []string) []Collision {
+	// artifact -> bin, and artifact -> the worktrees pointing at it.
+	bins := map[string]string{}
+	users := map[string][]string{}
+	var order []string
+	for _, wt := range worktrees {
+		for _, ws := range Workspaces(wt) {
+			if !wired(wt, ws) {
+				continue
+			}
+			for _, bin := range ws.Bins {
+				dest, err := os.Readlink(filepath.Join(LauncherBinDir(wt), bin))
+				if err != nil {
+					continue // a real file, or nothing: not a shared artifact
+				}
+				if _, seen := users[dest]; !seen {
+					order = append(order, dest)
+					bins[dest] = bin
+				}
+				users[dest] = append(users[dest], wt)
+			}
+		}
+	}
+	var out []Collision
+	for _, artifact := range order {
+		if len(users[artifact]) < 2 {
+			continue
+		}
+		out = append(out, Collision{
+			Bin: bins[artifact], Artifact: artifact, Worktrees: users[artifact],
+		})
 	}
 	return out
 }
