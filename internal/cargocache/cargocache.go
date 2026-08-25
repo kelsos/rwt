@@ -1,12 +1,39 @@
-// Package cargocache points every rotki worktree's cargo builds at one shared
-// target directory per cargo workspace, so a fresh or switched-to worktree
-// reuses already-compiled dependencies instead of recompiling the tree.
+// Package cargocache gives every rotki worktree its own cargo target directory,
+// at <worktree>/target, and keeps the built service binaries where rotki's dev
+// launcher looks for them.
 //
-// Registry dependencies are fingerprinted by version, features and rustflags,
-// not by workspace path, so every worktree reuses them from the shared dir.
-// rotki's own crates carry a metadata hash derived from their manifest path, so
-// artifacts from different worktrees coexist rather than clobbering each other:
-// switching back to a worktree you already built is a no-op, not a rebuild.
+// It used to do the opposite. Until 2026-08 every worktree was pointed at one
+// shared target dir per workspace, on the theory that rotki's crates carry a
+// metadata hash derived from their manifest path and so could not collide. That
+// theory is false, and the cost of believing it was silent: cargo records
+// depfile paths *relative* to the workspace root, never absolute, so the
+// metadata hash and the fingerprint path are identical across worktrees. One
+// shared target dir is one fingerprint namespace for every worktree using it,
+// with freshness decided on mtimes inside it, and a worktree whose files are
+// older than the cached fingerprint is declared fresh and handed the
+// neighbour's compilation unit. Measured on a real umbrella, every worktree in
+// it resolved to a single colibri and a single starling.
+//
+// A target dir per worktree removes the failure by construction rather than
+// detecting it: separate dirs are separate namespaces, which is the arrangement
+// cargo assumes by default. Collisions is kept as the regression guard.
+//
+// The reuse this gives up is smaller than it looks and was measured before it
+// was traded away: a cold build of colibri and starling into an empty target dir
+// takes ~50s and 1.4GB, and rebuilding an already-built worktree stays a ~0.1s
+// no-op because each worktree keeps its own dir. Across the umbrella that is
+// less disk in total than the shared cache had grown to, since a shared dir
+// accumulates every worktree's artifacts without deduplicating them. Cargo's
+// exclusive per-target-dir lock, which made two worktrees building at once
+// serialise, goes away with it.
+//
+// sccache remains wired as a rustc-wrapper when installed, but it is a trim and
+// not the mechanism: with paths normalised it reaches ~92% on rustc invocations
+// across worktrees, and that converts to about 10% of wall clock, because a cold
+// build is dominated by link steps that sccache cannot cache at all. Making it
+// reach even that requires SCCACHE_BASEDIRS to name every worktree root, which
+// is a global sccache setting rather than a cargo one and is not yet rwt's to
+// manage.
 //
 // The wiring is a generated .cargo/config.toml at each workspace root rather
 // than an environment variable, because the dev launch itself shells out to
@@ -21,11 +48,6 @@
 // colibri/Cargo.toml` run from the worktree root, which is how both rwt and the
 // app build. The config always goes at the workspace root, whose ancestors
 // cover every cwd a build is launched from.
-//
-// The one cost is contention: cargo takes an exclusive lock on a target dir, so
-// two worktrees building the same workspace at the same time serialise. That is
-// a wait during compilation, not a failure, and only bites while something is
-// actually being built.
 package cargocache
 
 import (
@@ -117,10 +139,12 @@ func isWorkspaceManifest(path string) bool {
 // switches base switches layout with it.
 var excludePatterns = []string{"/.cargo/", "colibri/.cargo/", "crates/.cargo/"}
 
-// Root is the shared cache root holding one target dir per workspace.
-// RWT_CARGO_CACHE overrides it (used by the tests); otherwise it follows
-// XDG_CACHE_HOME, falling back to ~/.cache.
-func Root() (string, error) {
+// LegacyRoot is the old shared cache root, which held one target dir per
+// workspace shared by every worktree. Nothing builds into it any more; it
+// survives only so `rwt clean --cache` can reclaim it and `rwt doctor` can say
+// how much it is still holding. RWT_CARGO_CACHE overrides it (used by the
+// tests); otherwise it follows XDG_CACHE_HOME, falling back to ~/.cache.
+func LegacyRoot() (string, error) {
 	if v := os.Getenv("RWT_CARGO_CACHE"); v != "" {
 		return v, nil
 	}
@@ -129,18 +153,27 @@ func Root() (string, error) {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve the shared cargo cache root: %w", err)
+		return "", fmt.Errorf("cannot resolve the legacy cargo cache root: %w", err)
 	}
 	return filepath.Join(home, ".cache", "rwt", "target"), nil
 }
 
-// TargetDir is the shared target directory for one workspace.
-func TargetDir(ws Workspace) (string, error) {
-	root, err := Root()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(root, ws.Name), nil
+// TargetDir is a worktree's own target directory, shared by every cargo
+// workspace in it.
+//
+// One dir per worktree rather than one per workspace, for two reasons. rotki's
+// dev launcher looks for prebuilt binaries at <worktree>/target/debug/<name>
+// regardless of which workspace built them, so this is the only placement that
+// keeps that shortcut working on the split colibri/crates layout as well as on
+// the root workspace. And the path relative to the worktree root is then
+// identical everywhere, which is what lets sccache normalise the --out-dir and
+// -L dependency= arguments it hashes.
+//
+// Two workspaces sharing one dir inside a worktree is safe in a way that two
+// worktrees sharing one never was: they hold different packages, and a worktree
+// is only ever on one layout at a time.
+func TargetDir(worktree string) string {
+	return filepath.Join(worktree, "target")
 }
 
 // ConfigPath is the generated config file for one workspace in a worktree.
@@ -171,16 +204,20 @@ const generatedMarker = "# Generated by rwt"
 
 const header = generatedMarker + ` - do not edit; rwt new / setup / refresh rewrite this file.
 #
-# Every rotki worktree shares one target dir per cargo workspace, so dependencies
-# compile once and are reused everywhere. A worktree that has not changed since
-# its last build does not recompile at all; a fresh one compiles only rotki's own
-# crates. Reclaim the superseded per-worktree target dirs with ` + "`rwt clean`" + `.
+# This worktree builds into its own target dir. Worktrees used to share one, which
+# was silently wrong: cargo fingerprints its own crates on paths relative to the
+# workspace root, so a shared target dir is one fingerprint namespace for every
+# worktree using it, and worktrees with different sources end up running whichever
+# binary was built last. A dir per worktree is what cargo assumes by default.
 #
-# Incremental compilation is deliberately left at its default (on). sccache
-# cannot cache incrementally-compiled crates, so this trades sccache hits on the
-# workspace members for a fast edit-rebuild loop; the registry dependencies are
-# not built incrementally and are cached either way. Export CARGO_INCREMENTAL=0
-# to flip that trade if cold rebuilds ever start hurting more than the inner loop.
+# The cost is that a fresh worktree compiles its dependencies once (~50s), instead
+# of inheriting them. Rebuilds of an already-built worktree stay a no-op.
+#
+# Do NOT export CARGO_INCREMENTAL=1 with a rustc-wrapper set: sccache checks that
+# variable rather than the rustc flag and aborts the build outright with
+# "incremental compilation is prohibited". Left unset, as it is here, cargo still
+# compiles workspace members incrementally and sccache simply declines to cache
+# those, which is the trade we want.
 `
 
 // render builds the config file body. wrapper is omitted entirely when sccache
@@ -223,12 +260,9 @@ type Result struct {
 // a rewritten rustc-wrapper or target-dir invalidates the cached artifacts.
 func Wire(worktree string) (Result, error) {
 	wrapper := Wrapper()
+	target := TargetDir(worktree)
 	var res Result
 	for _, ws := range Workspaces(worktree) {
-		target, err := TargetDir(ws)
-		if err != nil {
-			return res, err
-		}
 		path := ConfigPath(worktree, ws)
 		want := render(target, wrapper)
 		switch got, err := os.ReadFile(path); {
@@ -239,9 +273,6 @@ func Wire(worktree string) (Result, error) {
 			res.Kept = append(res.Kept, ws.Name)
 			continue
 		}
-		if err := os.MkdirAll(target, 0o755); err != nil {
-			return res, fmt.Errorf("cannot create shared target dir %s: %w", target, err)
-		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return res, err
 		}
@@ -251,7 +282,44 @@ func Wire(worktree string) (Result, error) {
 		res.Wired = append(res.Wired, ws.Name)
 	}
 	prune(worktree, append(res.Wired, res.Kept...))
+	if len(res.Wired) > 0 {
+		DropSharedLinks(worktree)
+	}
 	return res, nil
+}
+
+// DropSharedLinks removes the launcher symlinks the shared-cache design planted
+// at <worktree>/target/debug/<name>, returning the binaries it unlinked.
+//
+// This is the migration, and it has to happen the moment a worktree is rewired:
+// those links point into the old shared cache, so leaving one in place would
+// keep the launcher running a neighbour's binary even though this worktree now
+// builds its own. The next build puts a real file at the same path.
+//
+// Only symlinks leading outside the worktree are removed. A real file there is
+// cargo's own output under the new scheme, and a relative link is not something
+// this package ever wrote.
+func DropSharedLinks(worktree string) []string {
+	debug := filepath.Join(TargetDir(worktree), "debug")
+	entries, err := os.ReadDir(debug)
+	if err != nil {
+		return nil
+	}
+	var dropped []string
+	for _, e := range entries {
+		p := filepath.Join(debug, e.Name())
+		dest, err := os.Readlink(p)
+		if err != nil || !filepath.IsAbs(dest) {
+			continue
+		}
+		if strings.HasPrefix(dest, worktree+string(filepath.Separator)) {
+			continue
+		}
+		if err := os.Remove(p); err == nil {
+			dropped = append(dropped, e.Name())
+		}
+	}
+	return dropped
 }
 
 // prune removes configs rwt generated for a layout the worktree is no longer on.
@@ -334,263 +402,33 @@ func LauncherBinDir(worktree string) string {
 	return filepath.Join(worktree, "target", "debug")
 }
 
-// wired reports whether a workspace's config actually points at the current
-// shared target dir. Everything that touches the shared cache's binaries is
-// gated on it, so a workspace left alone because it carries the developer's own
-// .cargo/config.toml is never involved.
+// wired reports whether a workspace's config actually points at this worktree's
+// own target dir, so that a workspace left alone because it carries the
+// developer's own .cargo/config.toml is never counted as rwt's.
 func wired(worktree string, ws Workspace) bool {
-	target, err := TargetDir(ws)
-	if err != nil {
-		return false
-	}
 	body, err := os.ReadFile(ConfigPath(worktree, ws))
-	return err == nil && strings.Contains(string(body), quote(target))
+	return err == nil && strings.Contains(string(body), quote(TargetDir(worktree)))
 }
 
-// PrepareBuild clears the shared uplift slots for a workspace's binaries so the
-// build that follows is guaranteed to re-link them for this worktree.
-//
-// <shared>/debug/<name> is one hardlink slot shared by every worktree, and cargo
-// only writes it when a build actually produces output: a build that is entirely
-// fresh leaves whichever worktree linked it last in place. Removing the slot
-// first turns that into a guarantee, because cargo does re-link a *missing* slot
-// even when nothing recompiles. That is what lets LinkBins tell, afterwards,
-// which deps/<name>-<hash> artifact is this worktree's.
-//
-// Deleting the slot costs nothing: it is a hardlink to an artifact under deps/,
-// so the compiled output survives and the relink is a filesystem operation, not
-// a rebuild.
-func PrepareBuild(worktree string, ws Workspace) error {
-	if !wired(worktree, ws) {
-		return nil
-	}
-	target, err := TargetDir(ws)
-	if err != nil {
-		return err
-	}
-	for _, bin := range ws.Bins {
-		if err := os.Remove(filepath.Join(target, "debug", bin)); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-	return nil
-}
-
-// LinkBins points <worktree>/target/debug/<name> at this worktree's freshly
-// built artifact in the shared cache, and returns the binaries it linked.
-//
-// It must be called after a build that PrepareBuild ran ahead of; that pairing
-// is what makes the uplift slot trustworthy at the moment it is read. The link
-// is made to the artifact under deps/ rather than to the slot, because the slot
-// is rewritten by every later build in any worktree, while the deps path at
-// least survives one.
-//
-// 🔴 This does NOT isolate worktrees, and an earlier version of this comment
-// claimed it did. Cargo's metadata hash is not derived from the worktree path:
-// it records depfile paths relative to the workspace root, so two worktrees
-// sharing a target dir are indistinguishable to it and collapse onto ONE
-// deps/<name>-<hash> artifact and one .fingerprint entry. Verified 2026-08-22 on
-// a real umbrella: develop and master had genuinely different colibri sources
-// and both resolved to colibri-029385afae5985ed. Whichever built last owns it,
-// and every worktree's symlink follows.
-//
-// Collisions returns the worktrees this affects, and `rwt doctor` reports them.
-// The real fix is per-worktree target dirs with a content-addressed cache
-// (sccache) doing the sharing, which is a change to the premise of this package
-// rather than to this function.
-//
-// A link that cannot be resolved is skipped rather than guessed at: the launcher
-// then falls back to `cargo run`, which is correct, just slower.
-func LinkBins(worktree string, ws Workspace) ([]string, error) {
-	if !wired(worktree, ws) {
-		return nil, nil
-	}
-	target, err := TargetDir(ws)
-	if err != nil {
-		return nil, err
-	}
-	debug := filepath.Join(target, "debug")
-	var linked []string
-	for _, bin := range ws.Bins {
-		artifact := artifactFor(debug, bin)
-		if artifact == "" {
-			continue
-		}
-		link := filepath.Join(LauncherBinDir(worktree), bin)
-		if dest, err := os.Readlink(link); err == nil && dest == artifact {
-			linked = append(linked, bin)
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
-			return linked, err
-		}
-		// Removes a leftover real binary from before this worktree was wired as
-		// readily as a stale symlink: either way it is what the launcher would
-		// otherwise run, and the shared cache now holds the current one.
-		if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
-			return linked, err
-		}
-		if err := os.Symlink(artifact, link); err != nil {
-			return linked, err
-		}
-		linked = append(linked, bin)
-	}
-	return linked, nil
-}
-
-// artifactFor resolves the shared uplift slot for one binary to the underlying
-// deps/<name>-<hash> artifact by matching inodes: cargo populates the slot by
-// hardlinking, so the two are the same file. Returns "" when there is no match,
-// which is the honest answer for a build that failed or a cargo that stopped
-// uplifting.
-func artifactFor(debug, bin string) string {
-	slot, err := os.Stat(filepath.Join(debug, bin))
-	if err != nil {
-		return ""
-	}
-	deps := filepath.Join(debug, "deps")
-	entries, err := os.ReadDir(deps)
-	if err != nil {
-		return ""
-	}
-	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), bin+"-") {
-			continue
-		}
-		p := filepath.Join(deps, e.Name())
-		if info, err := os.Stat(p); err == nil && os.SameFile(info, slot) {
-			return p
-		}
-	}
-	return ""
-}
-
-// PackageArgs turns binary names into the `-p <name>` pairs cargo takes, so a
-// caller can address exactly the packages it means.
-func PackageArgs(bins []string) []string {
-	args := make([]string, 0, len(bins)*2)
-	for _, bin := range bins {
-		args = append(args, "-p", bin)
-	}
-	return args
-}
-
-// StaleBins returns the workspace's binaries whose built artifact is older than
-// a source file it was compiled from.
-//
-// This exists because cargo can report a build fresh while its artifact is not.
-// The shared target dir is written by every worktree, and a package built from
-// two manifest roots (colibri as a workspace member and as its own workspace, as
-// the split layout still has it) keeps two artifacts whose fingerprints are
-// tracked separately. A build that resolves to the other one leaves this
-// worktree's artifact untouched and still reports "Finished", after which
-// LinkBins faithfully links a binary that predates the source. The dev launcher
-// prefers a prebuilt binary over `cargo run`, so the stale one is what runs, and
-// nothing says so: the service simply behaves like the code was never changed.
-//
-// The comparison uses cargo's own depfile (`<artifact>.d`), which lists every
-// source that went into the artifact, so it needs no cargo invocation and covers
-// whatever each binary actually depends on rather than a guess at its crate dir.
-// A binary with no artifact or no depfile yet is not stale, it is unbuilt.
-func StaleBins(worktree string, ws Workspace) ([]string, error) {
-	if !wired(worktree, ws) {
-		return nil, nil
-	}
-	target, err := TargetDir(ws)
-	if err != nil {
-		return nil, err
-	}
-	debug := filepath.Join(target, "debug")
-	var stale []string
-	for _, bin := range ws.Bins {
-		artifact := artifactFor(debug, bin)
-		if artifact == "" {
-			continue
-		}
-		built, err := os.Stat(artifact)
-		if err != nil {
-			continue
-		}
-		sources, err := depSources(artifact + ".d")
-		if err != nil || len(sources) == 0 {
-			continue
-		}
-		for _, source := range sources {
-			if !filepath.IsAbs(source) {
-				source = filepath.Join(worktree, source)
-			}
-			// A source that has since been deleted cannot be compared and is left
-			// to cargo, which fails the build rather than silently skipping it.
-			if info, err := os.Stat(source); err == nil && info.ModTime().After(built.ModTime()) {
-				stale = append(stale, bin)
-				break
-			}
-		}
-	}
-	return stale, nil
-}
-
-// depSources reads the source paths out of a cargo depfile.
-//
-// The format is make's: `<target>: <source> <source> ...`, with spaces inside a
-// path escaped as `\ `. Only the sources are wanted, and only from lines that
-// carry them: cargo also writes a bare `<source>:` line per dependency, which
-// would otherwise read as a target with no sources.
-func depSources(depfile string) ([]string, error) {
-	raw, err := os.ReadFile(depfile)
-	if err != nil {
-		return nil, err
-	}
-	var sources []string
-	for _, line := range strings.Split(string(raw), "\n") {
-		_, rest, found := strings.Cut(line, ": ")
-		if !found {
-			continue
-		}
-		// Split on unescaped spaces, so a path containing one survives intact.
-		for _, field := range strings.Split(strings.ReplaceAll(rest, `\ `, "\x00"), " ") {
-			if path := strings.ReplaceAll(strings.TrimSpace(field), "\x00", " "); path != "" {
-				sources = append(sources, path)
-			}
-		}
-	}
-	return sources, nil
-}
-
-// Status is one present workspace's cache wiring in a worktree, for rwt doctor.
+// Status is one present workspace's wiring in a worktree, for rwt doctor.
 type Status struct {
 	Name   string
-	Wired  bool   // its config.toml points at the current shared target dir
-	Target string // the shared target dir it should point at
-	Stale  bool   // a per-worktree target dir it supersedes is still on disk
+	Wired  bool   // its config.toml points at this worktree's own target dir
+	Target string // the target dir it should point at
 }
 
 // Inspect reports the wiring state of every workspace present in a worktree.
 func Inspect(worktree string) []Status {
+	target := TargetDir(worktree)
 	var out []Status
 	for _, ws := range Workspaces(worktree) {
-		s := Status{Name: ws.Name}
-		if target, err := TargetDir(ws); err == nil {
-			s.Target = target
-			s.Wired = wired(worktree, ws)
-		}
-		s.Stale = isCargoTarget(filepath.Join(worktree, ws.Dir, "target"))
-		out = append(out, s)
+		out = append(out, Status{
+			Name:   ws.Name,
+			Target: target,
+			Wired:  wired(worktree, ws),
+		})
 	}
 	return out
-}
-
-// WorkspaceTargetOf recovers the workspace target dir an artifact lives under,
-// by trimming the debug/deps/<file> tail cargo puts it behind. Used to name a
-// concrete per-worktree target dir in the collision hint, so the suggestion is
-// a sibling of the real shared dir rather than a guess.
-func WorkspaceTargetOf(artifact string) string {
-	dir := filepath.Dir(artifact) // .../debug/deps
-	if filepath.Base(dir) != "deps" {
-		return "<cache-root>/<workspace>"
-	}
-	dir = filepath.Dir(dir) // .../debug
-	return filepath.Dir(dir)
 }
 
 // Collision is one built binary that several worktrees resolve to. Every
@@ -604,12 +442,11 @@ type Collision struct {
 
 // Collisions reports binaries that more than one worktree resolves to.
 //
-// This is the observable half of the flaw described on LinkBins: a shared target
-// dir gives cargo one fingerprint namespace for every worktree using it, keyed
-// on paths relative to each workspace root, so worktrees with different sources
-// collapse onto one artifact. Nothing in the build says so, and the failure
-// looks like "my Rust change did not take effect" or a compile error citing a
-// symbol that exists only in a neighbour.
+// Per-worktree target dirs make this unreachable, which is the point: it is kept
+// as the regression guard for the failure described in the package comment, and
+// on a migrated umbrella it returns nothing. What it still catches is a worktree
+// left on the old wiring, since the symlink into the shared cache is exactly
+// what it looks for, and anyone who reintroduces a shared target dir by hand.
 //
 // Reported by symlink target rather than by comparing sources: resolving the
 // link is exact and costs a readlink, whereas "are these trees the same" is both
@@ -623,9 +460,10 @@ func Collisions(worktrees []string) []Collision {
 	var order []string
 	for _, wt := range worktrees {
 		for _, ws := range Workspaces(wt) {
-			if !wired(wt, ws) {
-				continue
-			}
+			// Deliberately not gated on wired(): a worktree still on the old
+			// shared-cache config is precisely what this has to catch, and that
+			// config points somewhere wired() now rejects. The symlink is the
+			// evidence, so read it and let the config say whatever it says.
 			for _, bin := range ws.Bins {
 				dest, err := os.Readlink(filepath.Join(LauncherBinDir(wt), bin))
 				if err != nil {
@@ -651,18 +489,21 @@ func Collisions(worktrees []string) []Collision {
 	return out
 }
 
-// localTargetDirs are every place a cargo target dir lands under a worktree,
-// across all three layouts. All of them are checked regardless of the worktree's
-// current layout: rebasing a worktree onto the root workspace leaves the old
-// colibri/target behind, and that leftover is exactly what needs reclaiming.
-var localTargetDirs = []string{"target", "colibri/target", "crates/target"}
+// supersededTargetDirs are the target dirs the split colibri/crates layout used
+// to build into. Every workspace now shares <worktree>/target, so these are
+// leftovers whichever layout the worktree is currently on: a worktree rebased
+// onto the root workspace keeps its old colibri/target, and one still on the
+// split layout stops writing to them the moment it is rewired.
+//
+// <worktree>/target is deliberately absent. It is the live build directory now,
+// not a leftover, and reclaiming it would delete the worktree's own output.
+var supersededTargetDirs = []string{"colibri/target", "crates/target"}
 
-// LocalTargets returns the per-worktree target directories that exist in a
-// worktree. These are what the shared cache supersedes and what rwt clean
-// reclaims.
-func LocalTargets(worktree string) []string {
+// SupersededTargets returns the target directories in a worktree that nothing
+// builds into any more. These are what rwt clean reclaims.
+func SupersededTargets(worktree string) []string {
 	var out []string
-	for _, rel := range localTargetDirs {
+	for _, rel := range supersededTargetDirs {
 		p := filepath.Join(worktree, rel)
 		if isCargoTarget(p) {
 			out = append(out, p)
@@ -709,15 +550,6 @@ func Reclaim(dir string, dryRun bool) (int64, error) {
 	for _, e := range entries {
 		p := filepath.Join(dir, e.Name())
 		switch {
-		case e.Name() == "debug" || e.Name() == "release":
-			n, left, err := reclaimProfile(p, dryRun)
-			freed += n
-			if err != nil {
-				return freed, err
-			}
-			if left {
-				kept++
-			}
 		case cargoEntries[e.Name()] || isTargetTriple(p):
 			n, err := remove(p, dryRun)
 			freed += n
@@ -734,36 +566,6 @@ func Reclaim(dir string, dryRun bool) (int64, error) {
 	return freed, nil
 }
 
-// reclaimProfile empties a profile dir of cargo's output while preserving the
-// launcher symlinks LinkBins plants in it. Those point into the shared cache,
-// occupy no disk, and still resolve afterwards; deleting them would push the
-// next dev launch back onto the `cargo run` fallback for nothing gained. It
-// reports the bytes freed and whether anything was left behind.
-func reclaimProfile(dir string, dryRun bool) (int64, bool, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0, false, err
-	}
-	var freed int64
-	kept := 0
-	for _, e := range entries {
-		p := filepath.Join(dir, e.Name())
-		if isLauncherLink(p) {
-			kept++
-			continue
-		}
-		n, err := remove(p, dryRun)
-		freed += n
-		if err != nil {
-			return freed, kept > 0, err
-		}
-	}
-	if kept == 0 && !dryRun {
-		os.Remove(dir)
-	}
-	return freed, kept > 0, nil
-}
-
 // remove deletes a path and reports its size, or with dryRun just measures it.
 func remove(path string, dryRun bool) (int64, error) {
 	n := DirSize(path)
@@ -774,17 +576,6 @@ func remove(path string, dryRun bool) (int64, error) {
 		return 0, err
 	}
 	return n, nil
-}
-
-// isLauncherLink identifies a symlink LinkBins planted: one pointing at an
-// absolute path outside the directory that holds it. Cargo's own output is
-// never that, so the test needs no bookkeeping to stay accurate.
-func isLauncherLink(p string) bool {
-	dest, err := os.Readlink(p)
-	if err != nil {
-		return false
-	}
-	return filepath.IsAbs(dest) && !strings.HasPrefix(dest, filepath.Dir(p)+string(filepath.Separator))
 }
 
 // isTargetTriple reports whether a target-dir entry is a cross-compile output

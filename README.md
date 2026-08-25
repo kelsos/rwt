@@ -288,13 +288,25 @@ The installed scripts are four-line shims that `exec rwt hooks run <stage>`, so
 upgrading rwt upgrades the checks. Bypass with git's own `--no-verify`, or
 `RWT_HOOKS=0` for the whole shell.
 
-## Shared cargo cache
+## Per-worktree cargo target dirs
 
-Every worktree points its cargo builds at one shared target dir per cargo
-workspace under `~/.cache/rwt/target/` (honoring `$XDG_CACHE_HOME`), so
-dependencies compile once and are reused everywhere. A fresh worktree only
-compiles rotki's own crates; switching back to one you already built is a no-op
-rather than a rebuild.
+Every worktree builds into its own `<worktree>/target`, and every cargo workspace
+inside that worktree shares it. Rebuilding a worktree you already built stays a
+no-op; a fresh one compiles its dependencies once, which measures at ~50s and
+1.4 GB for `colibri` + `starling`.
+
+**This replaces a shared cache, and the replacement is a bug fix.** Until
+2026-08 every worktree was pointed at one shared target dir per workspace under
+`~/.cache/rwt/target/`, on the theory that cargo's metadata hash kept their
+artifacts apart. It does not, and the failure was silent: worktrees ran each
+other's binaries. [Why the shared cache was wrong](#why-the-shared-cache-was-wrong)
+has the measurement.
+
+Across an umbrella this costs less disk than the shared cache did, not more: a
+shared target dir accumulates every worktree's artifacts without deduplicating
+them, so it had grown larger than the sum of the isolated dirs that replaced it.
+Cargo's exclusive per-target-dir lock, which made two worktrees building at the
+same time serialise, goes away with it.
 
 The wiring is a generated `.cargo/config.toml` at each workspace root, not an env
 var, because the dev launch shells out to cargo itself
@@ -309,59 +321,61 @@ shared `info/exclude`, so they never show up in `git status`.
 both rwt and the app build, so the config always goes at the workspace root and
 rwt's own warm steps `cd` into it.
 
-The layout is detected per worktree, because it differs by base:
+The layout is still detected per worktree, because it differs by base:
 
-| layout | shared dir | bases |
-| --- | --- | --- |
-| root `Cargo.toml` workspace (`colibri` + `crates/*` members) | `target/rotki` | current `develop` |
-| separate `colibri/` and `crates/` workspaces | `target/colibri`, `target/crates` | bases predating the merge |
-| `colibri/` only | `target/colibri` | older bases (`bugfixes`, `master`) |
+| layout | bases |
+| --- | --- |
+| root `Cargo.toml` workspace (`colibri` + `crates/*` members) | current `develop` |
+| separate `colibri/` and `crates/` workspaces | bases predating the merge |
+| `colibri/` only | older bases (`bugfixes`, `master`) |
+
+All of them build into `<worktree>/target`. Pointing the split layout's two
+workspaces at one dir is what keeps the dev launcher's shortcut working there,
+and is safe in a way sharing across worktrees never was: different packages, and
+a worktree is only ever on one layout at a time.
 
 Rebasing a worktree across that boundary re-wires it and removes the config rwt
-wrote for the old layout, so a worktree never compiles into two caches at once.
-A hand-written `.cargo/config.toml` is never touched (rwt reports it and skips
-wiring that workspace rather than overwriting it).
+wrote for the old layout. A hand-written `.cargo/config.toml` is never touched
+(rwt reports it and skips wiring that workspace rather than overwriting it).
 
 The detection is transitional: the root workspace becomes the baseline on every
 live base after the next rotki release, and the two fallback rows above go with
 it.
 
 `new`, `setup`, `refresh` and `clean` wire it automatically. If `sccache` is on
-`PATH` it is also set as the rustc wrapper, catching misses a target dir cannot
-(rustc upgrades, changed rustflags); its absence costs cache hits, not
-correctness.
+`PATH` it is also set as the rustc wrapper. It is a trim rather than a
+mechanism: with paths normalised it reaches ~92% on rustc invocations across
+worktrees, which converts to about 10% of wall clock, because a cold build is
+dominated by link steps that sccache cannot cache at all. Reaching even that
+needs `SCCACHE_BASEDIRS` to name every worktree root, which is a global sccache
+setting rather than a cargo one and is not yet managed by rwt.
 
-The one cost is contention: cargo takes an exclusive lock per target dir, so two
-worktrees building the *same* workspace at the same time serialise. That is a
-wait during compilation, not a failure.
+> **Do not export `CARGO_INCREMENTAL=1`.** With a rustc wrapper configured,
+> sccache checks that variable rather than the rustc flag and refuses to run at
+> all, failing every cargo build with `incremental compilation is prohibited` —
+> an error naming neither rwt nor sccache. Left unset, cargo still compiles
+> workspace members incrementally and sccache simply declines to cache those.
+> `rwt doctor` warns if it finds it set.
 
 ### Keeping the dev launcher off `cargo run`
 
 rotki's dev launcher runs `<worktree>/target/debug/<name>` when it exists and
-falls back to `cargo run` when it does not. Redirecting the target dir empties
-that path, so the fallback would fire on every launch: a visible "Compiling" at
-`pnpm run dev`, and an extra cargo process wedged between starling and the
-service it supervises.
+falls back to `cargo run` when it does not. Building into `<worktree>/target`
+puts cargo's own output at exactly that path, so the shortcut works with no
+bookkeeping at all.
 
-So after each warm build rwt symlinks that path at the artifact the build
-produced in the shared cache:
+This used to take real machinery: clearing the shared dir's hardlink "uplift
+slot" before each build, matching inodes against `deps/` afterwards to work out
+which artifact was this worktree's, symlinking the result, and a staleness check
+that ran `cargo clean -p` when the shared dir handed back an artifact older than
+its own sources. All of it existed to compensate for the shared target dir, and
+all of it is gone.
 
-```
-develop/target/debug/colibri -> ~/.cache/rwt/target/rotki/debug/deps/colibri-288ac144823fe9e3
-```
+### Why the shared cache was wrong
 
-It links to the artifact under `deps/` rather than to `debug/colibri`, because
-that top-level path is a single hardlink slot every worktree shares and it
-belongs to whichever one built last. Cargo only writes the slot when a build
-produces output, so rwt clears it before building: cargo re-links a missing slot
-even when nothing recompiles, which is what makes the artifact identifiable
-afterwards.
-
-#### This does not isolate worktrees
-
-Earlier versions of this section claimed the `deps/` hash was derived from the
-worktree's manifest path, so the link could never serve another worktree's
-build. **That is false**, and it was measured rather than reasoned about:
+The shared design claimed the `deps/` hash was derived from the worktree's
+manifest path, so two worktrees could never collide. **That is false**, and it
+was measured rather than reasoned about:
 
 ```
 develop/target/debug/colibri -> .../deps/colibri-029385afae5985ed
@@ -373,15 +387,18 @@ cache held exactly one colibri artifact and one `.fingerprint` entry. Cargo
 records depfile paths **relative** to the workspace root (`colibri/src/main.rs`,
 not an absolute path), so two worktrees sharing a target dir are
 indistinguishable to it: one fingerprint namespace, one artifact, freshness
-decided on mtimes within it. Whichever worktree built last owns the binary, and
-every other worktree's symlink follows it.
+decided on mtimes within it. Whichever worktree built last owned the binary, and
+every other worktree's symlink followed it.
 
-That is also why a build can fail against a symbol that exists only in a
-neighbour's tree. It is not the symlink misbehaving; it is cargo reusing a
+That is also why a build could fail against a symbol that exists only in a
+neighbour's tree. It was not the symlink misbehaving; it was cargo reusing a
 neighbour's compilation unit.
 
-`rwt doctor` detects and reports this, since nothing in cargo's own output
-mentions it:
+On the umbrella that produced the measurement, **every** worktree resolved to a
+single `colibri` and a single `starling`. This was the normal state, not an edge
+case.
+
+`rwt doctor` still reports it, now as a regression guard that should stay silent:
 
 ```
 [FAIL] 2 binaries shared across worktrees
@@ -389,14 +406,25 @@ mentions it:
        starling: develop, master
 ```
 
-The workaround is to take one worktree out of the shared dir
-(`CARGO_TARGET_DIR=<cache>/rotki-<slug> pnpm run dev:web`). The real fix is
-per-worktree target dirs with a content-addressed cache (`sccache`) doing the
-sharing, since content addressing is exactly the property a shared target dir
-lacks. That inverts the premise of this feature, so it is not done yet.
+It reads the symlinks rather than the config, so it catches a worktree left on
+the old wiring as well as anyone who reintroduces a shared `CARGO_TARGET_DIR` by
+hand. To migrate a worktree it names, run `rwt clean`.
 
-If the artifact cannot be identified the link is skipped rather than guessed at,
-and the launcher takes its `cargo run` fallback: slower, still correct.
+### Migrating off the shared cache
+
+`rwt clean` does it, per worktree or across the umbrella:
+
+- rewires each workspace onto `<worktree>/target`
+- drops the symlinks pointing into the old shared cache, which is what stops a
+  worktree from running its neighbour's binary
+- reclaims `colibri/target` and `crates/target`, which nothing builds into now
+
+`<worktree>/target` itself is never reclaimed: it is the live build directory,
+and removing it would buy back disk in exchange for a cold rebuild. Use `cargo
+clean` inside a worktree for that.
+
+Once every worktree is migrated, the old shared cache is pure garbage and is
+where the reclaimable disk actually is. `rwt clean --cache` removes it.
 
 ### Rebuilding one ecosystem (`setup --only`)
 
@@ -434,10 +462,11 @@ rwt clean login-crash  # limit it to one worktree
 rwt clean --cache      # also drop the shared dirs (full rebuild everywhere)
 ```
 
-`clean` wires before removing by design: deleting a target dir from an unwired
-worktree would just trade disk for a cold rebuild. `rwt doctor` reports the
-shared cache size, any unwired workspaces, and how much disk the superseded
-per-worktree target dirs still hold.
+`clean` wires before removing by design: the wiring is what redirects a worktree
+onto its own target dir and drops its links into the old shared cache, so doing
+it second would leave a reclaimed worktree still pointing at a neighbour's
+binary. `rwt doctor` reports total target-dir size, any unwired workspaces, how
+much disk the superseded dirs hold, and whatever is left in the old shared cache.
 
 It removes only what cargo put in a target dir — its markers, its profile dirs,
 and the per-triple dirs a cross-compile leaves behind — and keeps two things that
@@ -505,7 +534,7 @@ re-running the install.
 ## Status
 
 Feature-complete for its intended scope: worktree lifecycle (`new` / `setup` /
-`ls` / `rm` / `refresh`), the shared cargo cache (`clean`), the local gates
+`ls` / `rm` / `refresh`), cargo target dirs (`clean`), the local gates
 (`check` / `hooks`), `config`, `doctor`, shell completion, and the conveniences
 `--type`, `--demo`, `rwt go`, `ls --live`, and `rm --merged`.
 
@@ -520,7 +549,8 @@ on Linux open editor handles don't block worktree removal anyway.
 
 - `RWT_UMBRELLA` — path to the `rotki/rotki` umbrella. Takes precedence over the
   configured path; there is no built-in default (see **Configuration**).
-- `RWT_CARGO_CACHE` — root of the shared cargo target dirs. Takes precedence over
+- `RWT_CARGO_CACHE` — root of the *old* shared cargo cache, which now only
+  `rwt clean --cache` and `rwt doctor` look at. Takes precedence over
   `$XDG_CACHE_HOME/rwt/target` and `~/.cache/rwt/target`.
 - `RWT_HOOKS=0` makes the installed git hooks a no-op for this shell, without
   reaching for `--no-verify` on every command.

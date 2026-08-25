@@ -114,44 +114,65 @@ func reportHooks(ctx context.Context) {
 	}
 }
 
-// reportCargoCache summarises the shared cargo cache: how big it is, how many
-// worktrees are wired to it, and how much disk the superseded per-worktree
-// target dirs are still holding. Informational rather than pass/fail — an
-// unwired worktree builds fine, it just pays for every compile itself.
+// reportCargoCache summarises cargo target dirs: which workspaces are wired to
+// their own, and how much disk the superseded dirs and the old shared cache are
+// still holding. Informational rather than pass/fail — an unwired worktree
+// builds fine, it just may not build where the dev launcher looks.
 // It returns whether it found a cross-worktree binary collision, which is a
 // real fault rather than a note.
 func reportCargoCache(ctx context.Context) (collided bool) {
-	root, err := cargocache.Root()
-	if err != nil {
-		return false
-	}
-	fmt.Printf("\ncargo cache: %s (%s)\n", root, cargocache.HumanBytes(cargocache.DirSize(root)))
-
 	wts, err := git.List(ctx, rotki.HostWorktreePath())
 	if err != nil {
 		return false
 	}
 	var unwired []string
-	var localBytes int64
+	var supersededBytes, liveBytes int64
 	for _, w := range wts {
 		for _, s := range cargocache.Inspect(w.Path) {
 			if !s.Wired {
 				unwired = append(unwired, filepath.Base(w.Path)+"/"+s.Name)
 			}
 		}
-		for _, dir := range cargocache.LocalTargets(w.Path) {
-			localBytes += cargocache.DirSize(dir)
+		for _, dir := range cargocache.SupersededTargets(w.Path) {
+			supersededBytes += cargocache.DirSize(dir)
 		}
+		liveBytes += cargocache.DirSize(cargocache.TargetDir(w.Path))
 	}
+	fmt.Printf("\ncargo target dirs: one per worktree (%s across %d)\n",
+		cargocache.HumanBytes(liveBytes), len(wts))
 	if len(unwired) > 0 {
 		fmt.Printf("       %d workspace(s) not wired: %s\n", len(unwired), strings.Join(unwired, ", "))
 		fmt.Printf("       wire them with: rwt clean\n")
 	}
-	if localBytes > 0 {
-		fmt.Printf("       %s still held by superseded per-worktree target dirs (rwt clean)\n",
-			cargocache.HumanBytes(localBytes))
+	if supersededBytes > 0 {
+		fmt.Printf("       %s held by superseded target dirs (rwt clean)\n",
+			cargocache.HumanBytes(supersededBytes))
 	}
+	if root, err := cargocache.LegacyRoot(); err == nil {
+		if size := cargocache.DirSize(root); size > 0 {
+			fmt.Printf("       %s still in the old shared cache %s\n", cargocache.HumanBytes(size), root)
+			fmt.Printf("       nothing builds into it now; reclaim it with: rwt clean --cache\n")
+		}
+	}
+	reportIncremental()
 	return reportCollisions(paths(wts))
+}
+
+// reportIncremental warns about CARGO_INCREMENTAL being exported, which is fatal
+// in combination with the rustc-wrapper the generated config sets: sccache
+// checks the environment variable rather than the rustc flag and refuses to run
+// at all, failing the build with "incremental compilation is prohibited". The
+// error names neither rwt nor the variable that caused it, and it fires for
+// every cargo build in every worktree, so it is worth naming here.
+func reportIncremental() {
+	v, set := os.LookupEnv("CARGO_INCREMENTAL")
+	if !set || v == "0" || cargocache.Wrapper() == "" {
+		return
+	}
+	fmt.Printf("\n[warn] CARGO_INCREMENTAL=%s is exported and sccache is wired as a rustc-wrapper\n", v)
+	fmt.Println("       sccache refuses to run at all in that combination, so every cargo")
+	fmt.Println("       build fails with \"incremental compilation is prohibited\".")
+	fmt.Println("       Unset it: cargo still builds workspace members incrementally.")
 }
 
 // reportCollisions names the worktrees that resolve to the same built binary.
@@ -174,11 +195,10 @@ func reportCollisions(worktrees []string) bool {
 		fmt.Printf("       %s: %s\n", c.Bin, strings.Join(names, ", "))
 	}
 	fmt.Println("       These worktrees all run the SAME binary; only one of them built it.")
-	fmt.Println("       A shared target dir gives cargo one fingerprint namespace for every")
-	fmt.Println("       worktree, so it cannot tell them apart (see cargocache.LinkBins).")
-	fmt.Println("       Isolate the worktree you are working in:")
-	fmt.Printf("         CARGO_TARGET_DIR=%s-<slug> pnpm run dev:web\n",
-		cargocache.WorkspaceTargetOf(found[0].Artifact))
+	fmt.Println("       They are still on the old shared target dir, which gave cargo one")
+	fmt.Println("       fingerprint namespace for every worktree using it.")
+	fmt.Println("       Migrate them onto their own target dirs:")
+	fmt.Println("         rwt clean")
 	fmt.Println("       Verify what is actually running, never the build line:")
 	fmt.Println("         readlink /proc/<pid-listening-on-its-port>/exe")
 	return true
