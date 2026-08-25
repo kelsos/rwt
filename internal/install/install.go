@@ -81,72 +81,27 @@ func stepsWith(worktree string, lint bool) []Step {
 		{Name: "uv", Eco: EcoUv, Dir: ".", Argv: uv},
 	}
 	for _, ws := range cargocache.Workspaces(worktree) {
-		steps = append(steps, cargoStep(worktree, ws))
+		steps = append(steps, cargoStep(ws))
 	}
 	return steps
 }
 
-// cargoStep is one workspace's warm build, bracketed by the bookkeeping that
-// keeps the built binaries findable from the worktree.
+// cargoStep is one workspace's warm build.
 //
-// rotki's dev launcher runs <worktree>/target/debug/<name> when it exists and
-// falls back to `cargo run` when it does not. Redirecting the target dir empties
-// that path, so every dev launch took the fallback: a visible "Compiling" at
-// `pnpm run dev`, and an extra cargo process in between starling and the service
-// it supervises. Clearing the shared uplift slot beforehand and symlinking the
-// resulting artifact afterwards restores the fast path.
-//
-// Both hooks are best-effort. Failing them costs the launcher shortcut, not the
-// build, and the fallback they exist to avoid is still correct.
-func cargoStep(worktree string, ws cargocache.Workspace) Step {
+// It used to be bracketed by two hooks: one clearing the shared target dir's
+// uplift slot beforehand, one symlinking the resulting artifact to
+// <worktree>/target/debug/<name> afterwards, plus a staleness check that ran
+// `cargo clean -p` when the shared dir handed back an artifact older than its
+// own sources. All three existed only because worktrees shared a target dir.
+// Building into <worktree>/target puts cargo's own output exactly where rotki's
+// dev launcher looks, so there is nothing left to correct.
+func cargoStep(ws cargocache.Workspace) Step {
 	return Step{
 		Name: ws.Name,
 		Eco:  EcoCargo,
 		Dir:  ws.Dir,
 		Argv: ws.Build,
-		Before: func() error {
-			// Ahead of PrepareBuild, which removes the uplift slot the staleness
-			// check resolves this worktree's artifact through.
-			stale := dropStaleArtifacts(worktree, ws)
-			if err := cargocache.PrepareBuild(worktree, ws); err != nil {
-				return err
-			}
-			return stale
-		},
-		After: func() error {
-			_, err := cargocache.LinkBins(worktree, ws)
-			return err
-		},
 	}
-}
-
-// dropStaleArtifacts clears any binary whose artifact predates its own sources,
-// so the build that follows recompiles it instead of reporting Finished over it.
-//
-// cargo is the one deciding a build is fresh, and it can be wrong here: the
-// shared target dir holds an artifact per manifest root, and a build that
-// resolves to the other one leaves this worktree's untouched while still
-// succeeding. `cargo clean -p` is what invalidates it, since there is no flag to
-// force one package to rebuild. It clears that package across the shared cache,
-// so another worktree recompiles it once on its next warm build — the cost of
-// the alternative is a service running code that is not in the tree.
-//
-// Best-effort like the rest of the bookkeeping: if the check or the clean fails,
-// the build still runs and produces whatever cargo thinks is current.
-func dropStaleArtifacts(worktree string, ws cargocache.Workspace) error {
-	stale, err := cargocache.StaleBins(worktree, ws)
-	if err != nil || len(stale) == 0 {
-		return err
-	}
-	args := append([]string{"clean"}, cargocache.PackageArgs(stale)...)
-	cmd := exec.Command("cargo", args...)
-	cmd.Dir = filepath.Join(worktree, ws.Dir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("rebuilding stale %s failed: %v: %s",
-			strings.Join(stale, ", "), err, strings.TrimSpace(string(out)))
-	}
-	return fmt.Errorf("rebuilding %s: its artifact was older than its sources",
-		strings.Join(stale, ", "))
 }
 
 // Ecosystem tags, the stable selectors behind Only. A Rust step's Name varies

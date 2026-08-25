@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // worktree builds a fake worktree with the shared cache root redirected into the
@@ -113,36 +112,53 @@ func TestRootPackageManifestIsNotAWorkspace(t *testing.T) {
 	}
 }
 
-// TestWirePointsAtSharedTarget is the core contract: the generated config sends
-// cargo at the shared per-workspace target dir, and separate workspaces get
-// distinct dirs so they never contend on one lock.
-func TestWirePointsAtSharedTarget(t *testing.T) {
+// TestWirePointsAtThisWorktreesTarget is the core contract, and it is the
+// inverse of the one this package shipped until 2026-08: every workspace in a
+// worktree builds into that worktree's own target dir. Workspaces sharing a dir
+// inside one worktree is fine (different packages, one layout at a time); it is
+// worktrees sharing one that collapsed them onto a single binary.
+func TestWirePointsAtThisWorktreesTarget(t *testing.T) {
 	wt := worktree(t)
 	splitLayout(t, wt, "colibri", "crates")
 
 	if _, err := Wire(wt); err != nil {
 		t.Fatalf("Wire: %v", err)
 	}
-	seen := map[string]bool{}
+	target := TargetDir(wt)
+	if want := filepath.Join(wt, "target"); target != want {
+		t.Fatalf("TargetDir = %s, want %s", target, want)
+	}
 	for _, ws := range Workspaces(wt) {
 		body, err := os.ReadFile(ConfigPath(wt, ws))
 		if err != nil {
 			t.Fatalf("reading %s config: %v", ws.Name, err)
 		}
-		target, err := TargetDir(ws)
-		if err != nil {
-			t.Fatal(err)
-		}
 		if !strings.Contains(string(body), `target-dir = "`+target+`"`) {
 			t.Errorf("%s config does not point at %s:\n%s", ws.Name, target, body)
 		}
-		if seen[target] {
-			t.Errorf("workspaces share the target dir %s; they must be separate", target)
+	}
+}
+
+// TestWireGivesTwoWorktreesDifferentTargets is the regression for the bug this
+// design replaces: two worktrees must never resolve to one target dir, whatever
+// their layout, because that is what gave cargo a single fingerprint namespace
+// for both and let one serve the other's binary.
+func TestWireGivesTwoWorktreesDifferentTargets(t *testing.T) {
+	a, b := worktree(t), worktree(t)
+	rootLayout(t, a)
+	rootLayout(t, b)
+
+	for _, wt := range []string{a, b} {
+		if _, err := Wire(wt); err != nil {
+			t.Fatalf("Wire(%s): %v", wt, err)
 		}
-		seen[target] = true
-		if _, err := os.Stat(target); err != nil {
-			t.Errorf("shared target dir %s was not created: %v", target, err)
-		}
+	}
+	if TargetDir(a) == TargetDir(b) {
+		t.Fatalf("both worktrees build into %s", TargetDir(a))
+	}
+	bodyA, _ := os.ReadFile(ConfigPath(a, rootWorkspace))
+	if strings.Contains(string(bodyA), TargetDir(b)) {
+		t.Error("worktree a's config names worktree b's target dir")
 	}
 }
 
@@ -269,20 +285,14 @@ func TestWireIsIdempotent(t *testing.T) {
 }
 
 // TestInspectReportsWiring covers what doctor renders: unwired before Wire,
-// wired after, with a leftover per-worktree target flagged stale.
+// wired after.
 func TestInspectReportsWiring(t *testing.T) {
 	wt := worktree(t)
 	rootLayout(t, wt)
-	cargoTarget(t, filepath.Join(wt, "target"))
 
-	before := Inspect(wt)[0]
-	if before.Wired {
+	if before := Inspect(wt)[0]; before.Wired {
 		t.Errorf("expected unwired before Wire, got %+v", before)
 	}
-	if !before.Stale {
-		t.Errorf("expected the leftover target dir to be flagged stale")
-	}
-
 	if _, err := Wire(wt); err != nil {
 		t.Fatalf("Wire: %v", err)
 	}
@@ -291,39 +301,35 @@ func TestInspectReportsWiring(t *testing.T) {
 	}
 }
 
-// TestLocalTargetsSpansLayouts is what rwt clean reclaims. Every layout's target
-// dir is found regardless of the worktree's current layout: rebasing onto the
-// root workspace strands the old colibri/target, and that is the dir most worth
-// reclaiming.
-func TestLocalTargetsSpansLayouts(t *testing.T) {
+// TestSupersededTargetsExcludesTheLiveDir is the footgun this rename guards.
+// <worktree>/target is where every workspace builds now, so `rwt clean` must
+// never offer it up: reclaiming it would delete the worktree's own output and
+// buy back disk in exchange for a cold rebuild. Only the split layout's dirs,
+// which nothing writes to any more, are reclaimable.
+func TestSupersededTargetsExcludesTheLiveDir(t *testing.T) {
 	wt := worktree(t)
 	rootLayout(t, wt)
 	cargoTarget(t, filepath.Join(wt, "target"))
 	cargoTarget(t, filepath.Join(wt, "colibri", "target"))
 
-	got := LocalTargets(wt)
-	want := []string{filepath.Join(wt, "target"), filepath.Join(wt, "colibri", "target")}
-	if len(got) != len(want) {
-		t.Fatalf("LocalTargets = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("LocalTargets[%d] = %s, want %s", i, got[i], want[i])
-		}
+	got := SupersededTargets(wt)
+	want := []string{filepath.Join(wt, "colibri", "target")}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("SupersededTargets = %v, want %v", got, want)
 	}
 }
 
-// TestLocalTargetsIgnoresNonCargoDirs guards the removal: `target` is an ordinary
-// enough directory name that rwt clean must confirm cargo owns it before
-// deleting it.
-func TestLocalTargetsIgnoresNonCargoDirs(t *testing.T) {
+// TestSupersededTargetsIgnoresNonCargoDirs guards the removal: `target` is an
+// ordinary enough directory name that rwt clean must confirm cargo owns it
+// before deleting it.
+func TestSupersededTargetsIgnoresNonCargoDirs(t *testing.T) {
 	wt := worktree(t)
 	rootLayout(t, wt)
-	if err := os.MkdirAll(filepath.Join(wt, "target", "something"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(wt, "colibri", "target", "something"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if got := LocalTargets(wt); len(got) != 0 {
+	if got := SupersededTargets(wt); len(got) != 0 {
 		t.Errorf("expected an unmarked target dir to be left alone, got %v", got)
 	}
 }
@@ -363,259 +369,76 @@ func TestExcludeIsIdempotent(t *testing.T) {
 	}
 }
 
-// sharedDebug fakes the shared cache's debug dir for the root layout: one
-// artifact per worktree under deps/, with the uplift slot hardlinked at the one
-// belonging to `mine`, exactly as cargo leaves it after a build.
-func sharedDebug(t *testing.T, bin, mine string, others ...string) string {
+// legacyLink plants the launcher symlink the shared-cache design used to leave
+// at <worktree>/target/debug/<bin>: an absolute link into a cache directory
+// outside the worktree. This is the state every worktree is in before it is
+// migrated, and the thing that kept several of them running one binary.
+func legacyLink(t *testing.T, wt, bin string) string {
 	t.Helper()
-	target, err := TargetDir(rootWorkspace)
-	if err != nil {
+	shared := filepath.Join(t.TempDir(), "shared", "debug", "deps")
+	artifact := filepath.Join(shared, bin+"-aaaa1111")
+	write(t, artifact, "a neighbour's binary")
+	link := filepath.Join(wt, "target", "debug", bin)
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	debug := filepath.Join(target, "debug")
-	for _, hash := range append([]string{mine}, others...) {
-		write(t, filepath.Join(debug, "deps", bin+"-"+hash), "binary "+hash)
-		write(t, filepath.Join(debug, "deps", bin+"-"+hash+".d"), "depfile\n")
-	}
-	if err := os.Link(filepath.Join(debug, "deps", bin+"-"+mine), filepath.Join(debug, bin)); err != nil {
+	if err := os.Symlink(artifact, link); err != nil {
 		t.Fatal(err)
 	}
-	return debug
+	return link
 }
 
-// TestLinkBinsPointsAtThisWorktreesArtifact is the fix for the launcher falling
-// back to `cargo run`: rotki's dev launcher runs <worktree>/target/debug/<name>,
-// which redirecting the target dir leaves empty. The link has to resolve to the
-// deps artifact the uplift slot is hardlinked at, not to the slot itself, since
-// the slot belongs to whichever worktree built last.
-func TestLinkBinsPointsAtThisWorktreesArtifact(t *testing.T) {
+// TestWireDropsTheSharedCacheSymlink is the migration, and the whole point of
+// the change: rewiring a worktree onto its own target dir has to remove the link
+// into the old shared cache in the same breath. Leaving it would have the
+// launcher keep running the neighbour's binary even though this worktree now
+// builds its own, which is the original bug wearing a new hat.
+func TestWireDropsTheSharedCacheSymlink(t *testing.T) {
 	wt := worktree(t)
 	rootLayout(t, wt)
+	link := legacyLink(t, wt, "colibri")
+
 	if _, err := Wire(wt); err != nil {
 		t.Fatal(err)
 	}
-	debug := sharedDebug(t, "colibri", "aaaa1111", "bbbb2222")
-
-	linked, err := LinkBins(wt, rootWorkspace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(linked) != 1 || linked[0] != "colibri" {
-		t.Fatalf("linked = %v, want [colibri]", linked)
-	}
-	dest, err := os.Readlink(filepath.Join(LauncherBinDir(wt), "colibri"))
-	if err != nil {
-		t.Fatalf("launcher path is not a symlink: %v", err)
-	}
-	if want := filepath.Join(debug, "deps", "colibri-aaaa1111"); dest != want {
-		t.Errorf("link resolves to %s, want the deps artifact %s", dest, want)
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Errorf("the symlink into the shared cache survived Wire: %v", err)
 	}
 }
 
-// TestLinkBinsReplacesAPreWiringBinary covers the worktree that was built before
-// the shared cache existed: target/debug/colibri is a real binary there, and
-// leaving it would have the launcher run a stale build forever.
-func TestLinkBinsReplacesAPreWiringBinary(t *testing.T) {
+// TestDropSharedLinksKeepsARealBinary: under the new scheme cargo's own output
+// sits at exactly the path the old symlink occupied, so removing anything that
+// is not a symlink out of the worktree would delete a freshly built binary.
+func TestDropSharedLinksKeepsARealBinary(t *testing.T) {
 	wt := worktree(t)
 	rootLayout(t, wt)
-	if _, err := Wire(wt); err != nil {
-		t.Fatal(err)
-	}
-	sharedDebug(t, "colibri", "aaaa1111")
-	write(t, filepath.Join(LauncherBinDir(wt), "colibri"), "stale pre-wiring binary")
+	real := filepath.Join(wt, "target", "debug", "colibri")
+	write(t, real, "this worktree's own build")
 
-	if _, err := LinkBins(wt, rootWorkspace); err != nil {
-		t.Fatal(err)
+	if dropped := DropSharedLinks(wt); len(dropped) != 0 {
+		t.Fatalf("dropped %v, want nothing", dropped)
 	}
-	if _, err := os.Readlink(filepath.Join(LauncherBinDir(wt), "colibri")); err != nil {
-		t.Errorf("stale binary was not replaced by a symlink: %v", err)
+	if body, err := os.ReadFile(real); err != nil || string(body) != "this worktree's own build" {
+		t.Errorf("a real binary was removed: %q, %v", body, err)
 	}
 }
 
-// TestLinkBinsLeavesAnUnwiredWorkspaceAlone: a workspace kept on the
-// developer's own .cargo/config.toml builds into its own target dir, so its
-// binary is neither rwt's to remove nor the shared cache's to point at.
-func TestLinkBinsLeavesAnUnwiredWorkspaceAlone(t *testing.T) {
+// A link pointing inside the worktree is not the shared cache's, so it stays.
+func TestDropSharedLinksKeepsAnInternalLink(t *testing.T) {
 	wt := worktree(t)
 	rootLayout(t, wt)
-	write(t, ConfigPath(wt, rootWorkspace), "[build]\nrustflags = []\n")
-	sharedDebug(t, "colibri", "aaaa1111")
-	own := filepath.Join(LauncherBinDir(wt), "colibri")
-	write(t, own, "the developer's own build")
-
-	linked, err := LinkBins(wt, rootWorkspace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(linked) != 0 {
-		t.Errorf("linked %v in an unwired worktree", linked)
-	}
-	if body, err := os.ReadFile(own); err != nil || string(body) != "the developer's own build" {
-		t.Errorf("the developer's own binary was touched: %q, %v", body, err)
-	}
-}
-
-// staleFixture wires a root-layout worktree with one built colibri artifact and
-// a depfile naming one source, and returns the worktree and that source's path.
-func staleFixture(t *testing.T) (wt, source string) {
-	t.Helper()
-	wt = worktree(t)
-	rootLayout(t, wt)
-	if _, err := Wire(wt); err != nil {
-		t.Fatal(err)
-	}
-	debug := sharedDebug(t, "colibri", "aaaa1111")
-	artifact := filepath.Join(debug, "deps", "colibri-aaaa1111")
-	source = filepath.Join(wt, "colibri", "src", "main.rs")
-	write(t, source, "fn main() {}\n")
-	write(t, artifact+".d", artifact+": colibri/src/main.rs\n")
-	return wt, source
-}
-
-// TestStaleBinsFlagsAnArtifactOlderThanItsSources is the case that made a change
-// to colibri never reach the running service: cargo reported the build fresh,
-// left this worktree's artifact untouched, and LinkBins linked it anyway. The
-// depfile is what makes the mismatch visible without asking cargo.
-func TestStaleBinsFlagsAnArtifactOlderThanItsSources(t *testing.T) {
-	wt, source := staleFixture(t)
-	later := time.Now().Add(time.Hour)
-	if err := os.Chtimes(source, later, later); err != nil {
+	artifact := filepath.Join(wt, "target", "debug", "deps", "colibri-aaaa1111")
+	write(t, artifact, "mine")
+	link := filepath.Join(wt, "target", "debug", "colibri")
+	if err := os.Symlink(artifact, link); err != nil {
 		t.Fatal(err)
 	}
 
-	stale, err := StaleBins(wt, rootWorkspace)
-	if err != nil {
-		t.Fatal(err)
+	if dropped := DropSharedLinks(wt); len(dropped) != 0 {
+		t.Fatalf("dropped %v, want nothing", dropped)
 	}
-	if len(stale) != 1 || stale[0] != "colibri" {
-		t.Fatalf("stale = %v, want [colibri]", stale)
-	}
-}
-
-// The common case must stay silent, or every warm build would clean and rebuild.
-func TestStaleBinsAcceptsAnArtifactNewerThanItsSources(t *testing.T) {
-	wt, source := staleFixture(t)
-	earlier := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(source, earlier, earlier); err != nil {
-		t.Fatal(err)
-	}
-
-	stale, err := StaleBins(wt, rootWorkspace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(stale) != 0 {
-		t.Fatalf("stale = %v, want none", stale)
-	}
-}
-
-// A binary that was never built is not stale, it is absent: cleaning it would be
-// a no-op and reporting it would cry wolf on every fresh worktree.
-func TestStaleBinsIgnoresAnUnbuiltBin(t *testing.T) {
-	wt := worktree(t)
-	rootLayout(t, wt)
-	if _, err := Wire(wt); err != nil {
-		t.Fatal(err)
-	}
-
-	stale, err := StaleBins(wt, rootWorkspace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(stale) != 0 {
-		t.Fatalf("stale = %v, want none", stale)
-	}
-}
-
-// Cargo writes a bare `<source>:` line per dependency alongside the real target
-// line, and escapes spaces inside a path. Reading those as sources would compare
-// mtimes against paths that do not exist and miss the ones that do.
-func TestDepSourcesReadsOnlyTheSourcesOfTargetLines(t *testing.T) {
-	dir := t.TempDir()
-	depfile := filepath.Join(dir, "colibri-aaaa1111.d")
-	write(t, depfile, strings.Join([]string{
-		"/cache/debug/deps/colibri-aaaa1111: colibri/src/main.rs colibri/src/api/my\\ mod.rs",
-		"colibri/src/main.rs:",
-		"colibri/src/api/my\\ mod.rs:",
-		"",
-	}, "\n"))
-
-	sources, err := depSources(depfile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"colibri/src/main.rs", "colibri/src/api/my mod.rs"}
-	if len(sources) != len(want) {
-		t.Fatalf("sources = %v, want %v", sources, want)
-	}
-	for i := range want {
-		if sources[i] != want[i] {
-			t.Errorf("sources[%d] = %q, want %q", i, sources[i], want[i])
-		}
-	}
-}
-
-// TestLinkBinsSkipsAnUnresolvableSlot: with no uplift slot there is nothing to
-// identify this worktree's artifact by, and guessing would mean linking another
-// worktree's binary. Skipping leaves the launcher on its `cargo run` fallback,
-// which is slower but right.
-func TestLinkBinsSkipsAnUnresolvableSlot(t *testing.T) {
-	wt := worktree(t)
-	rootLayout(t, wt)
-	if _, err := Wire(wt); err != nil {
-		t.Fatal(err)
-	}
-	target, _ := TargetDir(rootWorkspace)
-	write(t, filepath.Join(target, "debug", "deps", "colibri-aaaa1111"), "orphan")
-
-	linked, err := LinkBins(wt, rootWorkspace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(linked) != 0 {
-		t.Errorf("linked %v with no uplift slot to match against", linked)
-	}
-	if _, err := os.Lstat(filepath.Join(LauncherBinDir(wt), "colibri")); !os.IsNotExist(err) {
-		t.Error("a link was planted despite the slot being unresolvable")
-	}
-}
-
-// TestPrepareBuildClearsTheUpliftSlot: cargo only writes the slot when a build
-// produces output, so a fresh build would leave another worktree's link in
-// place. Removing it first is what makes cargo re-link and LinkBins reliable.
-func TestPrepareBuildClearsTheUpliftSlot(t *testing.T) {
-	wt := worktree(t)
-	rootLayout(t, wt)
-	if _, err := Wire(wt); err != nil {
-		t.Fatal(err)
-	}
-	debug := sharedDebug(t, "colibri", "aaaa1111")
-
-	if err := PrepareBuild(wt, rootWorkspace); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(debug, "colibri")); !os.IsNotExist(err) {
-		t.Error("the uplift slot survived PrepareBuild")
-	}
-	// The compiled artifact must not go with it: the slot is only a hardlink,
-	// and clearing it has to stay free of any rebuild cost.
-	if _, err := os.Stat(filepath.Join(debug, "deps", "colibri-aaaa1111")); err != nil {
-		t.Errorf("the deps artifact was removed along with the slot: %v", err)
-	}
-}
-
-// TestPrepareBuildLeavesAnUnwiredWorkspaceAlone keeps rwt out of a target dir it
-// does not own.
-func TestPrepareBuildLeavesAnUnwiredWorkspaceAlone(t *testing.T) {
-	wt := worktree(t)
-	rootLayout(t, wt)
-	debug := sharedDebug(t, "colibri", "aaaa1111")
-
-	if err := PrepareBuild(wt, rootWorkspace); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(debug, "colibri")); err != nil {
-		t.Errorf("cleared the slot for an unwired worktree: %v", err)
+	if _, err := os.Lstat(link); err != nil {
+		t.Errorf("a link inside the worktree was removed: %v", err)
 	}
 }
 
@@ -646,12 +469,14 @@ func TestReclaimKeepsWhatCargoDidNotWrite(t *testing.T) {
 	}
 }
 
-// TestReclaimKeepsLauncherLinks: the symlinks LinkBins plants live inside
-// debug/, cost no disk, and still resolve after the reclaim. Dropping them would
-// send the next dev launch back to `cargo run` for nothing gained.
-func TestReclaimKeepsLauncherLinks(t *testing.T) {
+// TestReclaimRemovesLauncherLinks is the inverse of what this used to assert.
+// Reclaim once preserved the symlinks into the shared cache, on the grounds that
+// they cost no disk and kept the dev launcher off its `cargo run` fallback. They
+// now have to go: they resolve to another worktree's binary, and leaving one
+// behind in a reclaimed dir would preserve the exact bug the migration removes.
+func TestReclaimRemovesLauncherLinks(t *testing.T) {
 	wt := worktree(t)
-	target := cargoTarget(t, filepath.Join(wt, "target"))
+	target := cargoTarget(t, filepath.Join(wt, "colibri", "target"))
 	write(t, filepath.Join(target, "debug", "deps", "colibri-aaaa1111"), "compiled")
 	shared := filepath.Join(t.TempDir(), "colibri-aaaa1111")
 	write(t, shared, "the shared cache artifact")
@@ -663,15 +488,8 @@ func TestReclaimKeepsLauncherLinks(t *testing.T) {
 	if _, err := Reclaim(target, false); err != nil {
 		t.Fatal(err)
 	}
-	dest, err := os.Readlink(link)
-	if err != nil {
-		t.Fatalf("the launcher link was removed: %v", err)
-	}
-	if dest != shared {
-		t.Errorf("link now points at %s, want %s", dest, shared)
-	}
-	if _, err := os.Stat(filepath.Join(target, "debug", "deps")); !os.IsNotExist(err) {
-		t.Error("cargo's deps output survived alongside the link")
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Errorf("the link into the shared cache survived the reclaim: %v", err)
 	}
 }
 
