@@ -346,9 +346,26 @@ it.
 `PATH` it is also set as the rustc wrapper. It is a trim rather than a
 mechanism: with paths normalised it reaches ~92% on rustc invocations across
 worktrees, which converts to about 10% of wall clock, because a cold build is
-dominated by link steps that sccache cannot cache at all. Reaching even that
-needs `SCCACHE_BASEDIRS` to name every worktree root, which is a global sccache
-setting rather than a cargo one and is not yet managed by rwt.
+dominated by link steps that sccache cannot cache at all.
+
+Getting even that requires telling sccache the paths are equivalent, which rwt
+does by managing `basedirs` in `~/.config/sccache/config` (honoring
+`$SCCACHE_CONF` and `$XDG_CONFIG_HOME`). It lists **every worktree root** and is
+regenerated whenever the worktree set changes, since a stale entry is not inert:
+`basedirs` resolves by longest matching prefix, so a leftover can shadow the
+entry that should have matched. A common parent directory does not work at all —
+stripping it still leaves `develop/colibri/src/…` against `master/colibri/src/…`.
+Measured on two worktrees at the same commit: common parent **0%** Rust cache
+hits, per-worktree roots **92%**.
+
+sccache reads that file once at server start, so rwt stops the server whenever it
+rewrites it; the next build starts one that has read it. A config file you wrote
+yourself is never overwritten — rwt reports it and leaves it alone, since it may
+carry cache backends or limits rwt knows nothing about.
+
+> The variable is `SCCACHE_BASEDIRS`, **plural**. The singular is silently
+> ignored, and the only symptom is `Base directories (none)` in
+> `sccache --show-stats`. `rwt doctor` reports which worktrees are covered.
 
 > **Do not export `CARGO_INCREMENTAL=1`.** With a rustc wrapper configured,
 > sccache checks that variable rather than the rustc flag and refuses to run at
@@ -419,9 +436,12 @@ hand. To migrate a worktree it names, run `rwt clean`.
   worktree from running its neighbour's binary
 - reclaims `colibri/target` and `crates/target`, which nothing builds into now
 
-`<worktree>/target` itself is never reclaimed: it is the live build directory,
-and removing it would buy back disk in exchange for a cold rebuild. Use `cargo
-clean` inside a worktree for that.
+`<worktree>/target` is left alone by default: it is the live build directory, and
+reclaiming it trades disk for a cold rebuild (~50s). `--deep` does it anyway,
+when the disk matters more. It skips any worktree with a running dev session,
+checked by reading `/proc/<pid>/exe` rather than matching process names —
+starling respawns colibri, and Linux unlinks a running binary without complaint,
+so the supervisor would sit there exec'ing something that is no longer on disk.
 
 Once every worktree is migrated, the old shared cache is pure garbage and is
 where the reclaimable disk actually is. `rwt clean --cache` removes it.

@@ -52,11 +52,15 @@ package cargocache
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/kelsos/rwt/internal/git"
 )
@@ -193,6 +197,116 @@ func Wrapper() string {
 		return ""
 	}
 	return p
+}
+
+// SccacheConfigPath is the config file sccache reads at server start, honouring
+// SCCACHE_CONF and then XDG_CONFIG_HOME.
+func SccacheConfigPath() (string, error) {
+	if v := os.Getenv("SCCACHE_CONF"); v != "" {
+		return v, nil
+	}
+	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
+		return filepath.Join(v, "sccache", "config"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve the sccache config path: %w", err)
+	}
+	return filepath.Join(home, ".config", "sccache", "config"), nil
+}
+
+const sccacheHeader = generatedMarker + ` - do not edit; rwt rewrites this file.
+#
+# basedirs is what lets sccache reuse a compilation across worktrees. It strips
+# these prefixes from paths before hashing, so the same source at two checkouts
+# hashes identically. sccache hashes --out-dir and -L dependency= as well as the
+# sources, which is why this pairs with rwt's per-worktree target dirs: relative
+# to the worktree root every build presents "target/debug/deps", identically.
+#
+# It must list each WORKTREE ROOT. A common parent does not work: stripping it
+# leaves "develop/colibri/src/..." against "master/colibri/src/...", which still
+# differ. Measured on two worktrees at the same commit, a common parent gave 0%
+# Rust cache hits and per-worktree roots gave 92%.
+#
+# Note the plural. SCCACHE_BASEDIR (singular) is silently ignored, and the only
+# symptom is "Base directories (none)" in ` + "`sccache --show-stats`" + `.
+`
+
+// SyncBasedirs points sccache's basedirs at every worktree in the umbrella, and
+// reports whether the file changed.
+//
+// Regenerated wholesale from the current worktree list rather than appended to,
+// because a stale entry for a removed worktree is not harmless clutter: basedirs
+// resolves by longest matching prefix, so a leftover can shadow the entry that
+// should have matched.
+//
+// A config sccache's user wrote themselves is never overwritten. It may hold
+// cache backends, size limits or auth that rwt knows nothing about, and losing
+// those to a target-dir tool would be a poor trade for a 10% build speedup.
+//
+// The running server does not reread this: it loads the config at startup, so a
+// changed file takes effect on the next server start. Callers that care use
+// RestartSccache.
+func SyncBasedirs(worktrees []string) (changed bool, err error) {
+	if Wrapper() == "" {
+		return false, nil
+	}
+	path, err := SccacheConfigPath()
+	if err != nil {
+		return false, err
+	}
+	existing, err := os.ReadFile(path)
+	switch {
+	case err == nil && !strings.HasPrefix(string(existing), generatedMarker):
+		return false, errSccacheConfigNotOurs
+	case err != nil && !os.IsNotExist(err):
+		return false, err
+	}
+	want := renderSccacheConfig(worktrees)
+	if string(existing) == want {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(path, []byte(want), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// errSccacheConfigNotOurs marks the one failure callers report rather than treat
+// as broken: the developer has their own sccache config.
+var errSccacheConfigNotOurs = errors.New("sccache config was not written by rwt")
+
+// IsSccacheConfigNotOurs reports whether SyncBasedirs declined because the
+// config file belongs to the developer.
+func IsSccacheConfigNotOurs(err error) bool { return errors.Is(err, errSccacheConfigNotOurs) }
+
+// renderSccacheConfig builds the config body. Sorted so an unchanged umbrella
+// renders byte-identically and the file is not rewritten (and the server not
+// restarted) for a reordering of git's output.
+func renderSccacheConfig(worktrees []string) string {
+	dirs := append([]string(nil), worktrees...)
+	sort.Strings(dirs)
+	var b strings.Builder
+	b.WriteString(sccacheHeader)
+	b.WriteString("\nbasedirs = [\n")
+	for _, d := range dirs {
+		fmt.Fprintf(&b, "  %s,\n", quote(d))
+	}
+	b.WriteString("]\n")
+	return b.String()
+}
+
+// RestartSccache stops the sccache server so the next compile starts one that
+// has read the current config. Stopping is enough: any cargo build starts one on
+// demand. Best-effort, and silent when sccache is absent — a failure here costs
+// cache hits, not correctness.
+func RestartSccache() {
+	if wrapper := Wrapper(); wrapper != "" {
+		exec.Command(wrapper, "--stop-server").Run()
+	}
 }
 
 // header explains the file to whoever opens it in the rotki checkout, where it
@@ -411,22 +525,19 @@ func wired(worktree string, ws Workspace) bool {
 }
 
 // Status is one present workspace's wiring in a worktree, for rwt doctor.
+// The target dir it should point at is not carried here: it is TargetDir(worktree)
+// for every workspace in the worktree, so a per-workspace copy of it was only
+// ever a way to disagree with that.
 type Status struct {
-	Name   string
-	Wired  bool   // its config.toml points at this worktree's own target dir
-	Target string // the target dir it should point at
+	Name  string
+	Wired bool // its config.toml points at this worktree's own target dir
 }
 
 // Inspect reports the wiring state of every workspace present in a worktree.
 func Inspect(worktree string) []Status {
-	target := TargetDir(worktree)
 	var out []Status
 	for _, ws := range Workspaces(worktree) {
-		out = append(out, Status{
-			Name:   ws.Name,
-			Target: target,
-			Wired:  wired(worktree, ws),
-		})
+		out = append(out, Status{Name: ws.Name, Wired: wired(worktree, ws)})
 	}
 	return out
 }
@@ -498,6 +609,81 @@ func Collisions(worktrees []string) []Collision {
 // <worktree>/target is deliberately absent. It is the live build directory now,
 // not a leftover, and reclaiming it would delete the worktree's own output.
 var supersededTargetDirs = []string{"colibri/target", "crates/target"}
+
+// Running is one live process executing a binary out of a worktree's target dir.
+type Running struct {
+	PID  int
+	Exe  string // the binary it is running, as /proc reports it
+	Name string // the binary's base name, e.g. "starling"
+}
+
+// RunningFrom reports processes currently executing a binary from this
+// worktree's target dir.
+//
+// `rwt clean --deep` removes that directory, and doing it under a live dev
+// session is a real hazard rather than a theoretical one: starling supervises
+// colibri and restarts it, so a respawn after the removal finds nothing to
+// exec. Linux lets you unlink a running binary without complaint, which is
+// exactly why this has to be checked rather than relied on to fail.
+//
+// Read from /proc/<pid>/exe, which is the kernel's answer to "what is this
+// process actually running" and immune to the argv rewriting that makes a
+// pgrep-style match guessy. Processes owned by other users are skipped: their
+// exe link is unreadable, and they cannot be running out of this worktree's
+// target dir in any case.
+//
+// Two paths count as this worktree's, because /proc resolves symlinks. A
+// migrated worktree runs a real file under its own target dir, which the prefix
+// catches. One still on the old shared-cache wiring runs through a symlink, so
+// its exe reports the shared cache instead, and only comparing against what the
+// worktree's own links point at finds it. Missing that case would aim the guard
+// away from the worktrees most likely to be mid-session.
+func RunningFrom(worktree string) []Running {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	target := TargetDir(worktree)
+	prefix := target + string(filepath.Separator)
+	linked := linkTargets(filepath.Join(target, "debug"))
+	var out []Running
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		exe, err := os.Readlink(filepath.Join("/proc", e.Name(), "exe"))
+		if err != nil {
+			continue
+		}
+		// A binary unlinked since it started still reports its old path, with a
+		// " (deleted)" tail. Compared as a path, so it still matches: a process
+		// running a deleted artifact is the strongest reason not to touch the
+		// directory, since its supervisor cannot respawn it either.
+		exe = strings.TrimSuffix(exe, " (deleted)")
+		if !strings.HasPrefix(exe, prefix) && !linked[exe] {
+			continue
+		}
+		out = append(out, Running{PID: pid, Exe: exe, Name: filepath.Base(exe)})
+	}
+	return out
+}
+
+// linkTargets maps the absolute destinations of the symlinks directly inside a
+// directory, so a process running through one can be traced back to it.
+func linkTargets(dir string) map[string]bool {
+	out := map[string]bool{}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if dest, err := os.Readlink(filepath.Join(dir, e.Name())); err == nil && filepath.IsAbs(dest) {
+			out[dest] = true
+		}
+	}
+	return out
+}
 
 // SupersededTargets returns the target directories in a worktree that nothing
 // builds into any more. These are what rwt clean reclaims.
@@ -610,15 +796,34 @@ func isCargoTarget(dir string) bool {
 // DirSize sums the on-disk size of a directory tree, best-effort: unreadable
 // entries are skipped rather than failing the walk, since this only ever feeds a
 // human-facing "reclaimed" number.
+//
+// A hardlinked file is counted once, however many links to it the tree holds.
+// Cargo hardlinks heavily — the uplift slot at debug/<name> is a link to the
+// artifact under debug/deps/ — so counting every link inflated these figures
+// well past what the disk would actually give back: a target dir `du` put at
+// 1.4 GB reported as several. Since the number exists to answer "is reclaiming
+// this worth it", the honest one is what `du` would say.
 func DirSize(root string) int64 {
 	var total int64
+	seen := map[[2]uint64]bool{}
 	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if info, err := d.Info(); err == nil {
-			total += info.Size()
+		info, err := d.Info()
+		if err != nil {
+			return nil
 		}
+		// Only multiply-linked files need the bookkeeping, and only on systems
+		// exposing the inode. Anywhere else this is the plain sum it always was.
+		if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 {
+			key := [2]uint64{uint64(st.Dev), uint64(st.Ino)}
+			if seen[key] {
+				return nil
+			}
+			seen[key] = true
+		}
+		total += info.Size()
 		return nil
 	})
 	return total

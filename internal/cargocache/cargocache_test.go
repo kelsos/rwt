@@ -319,6 +319,131 @@ func TestSupersededTargetsExcludesTheLiveDir(t *testing.T) {
 	}
 }
 
+// TestDirSizeCountsAHardlinkOnce is what makes the reclaim figures honest.
+// Cargo hardlinks heavily, so counting every link reported far more than the
+// disk would actually give back — and the number exists precisely to answer
+// "is reclaiming this worth it".
+func TestDirSizeCountsAHardlinkOnce(t *testing.T) {
+	dir := t.TempDir()
+	body := strings.Repeat("x", 4096)
+	write(t, filepath.Join(dir, "deps", "colibri-aaaa1111"), body)
+	// The uplift slot: cargo populates it by hardlinking the deps artifact.
+	if err := os.Link(filepath.Join(dir, "deps", "colibri-aaaa1111"), filepath.Join(dir, "colibri")); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := DirSize(dir); got != int64(len(body)) {
+		t.Errorf("DirSize = %d, want %d (the hardlink counted twice)", got, len(body))
+	}
+}
+
+// Distinct files still add up; the dedup must key on the inode, not the size.
+func TestDirSizeSumsDistinctFiles(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "a"), strings.Repeat("x", 100))
+	write(t, filepath.Join(dir, "b"), strings.Repeat("y", 100))
+
+	if got := DirSize(dir); got != 200 {
+		t.Errorf("DirSize = %d, want 200", got)
+	}
+}
+
+// TestRunningFromIgnoresAnIdleWorktree: the guard on `clean --deep` must not cry
+// wolf, or it would refuse to reclaim anything.
+func TestRunningFromIgnoresAnIdleWorktree(t *testing.T) {
+	wt := worktree(t)
+	write(t, filepath.Join(wt, "target", "debug", "colibri"), "not running")
+
+	if got := RunningFrom(wt); len(got) != 0 {
+		t.Errorf("RunningFrom = %+v, want none", got)
+	}
+}
+
+// TestRunningFromFindsALiveProcess is the case that matters: rotki's starling
+// supervises colibri and respawns it, so removing a target dir under a live dev
+// session leaves the supervisor exec'ing a binary that is gone. Linux unlinks a
+// running executable without complaint, so this has to be detected up front.
+func TestRunningFromFindsALiveProcess(t *testing.T) {
+	wt := worktree(t)
+	// A real executable at the path a service binary would occupy.
+	sh, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep binary")
+	}
+	src, err := os.ReadFile(sh)
+	if err != nil {
+		t.Skip("cannot read sleep binary")
+	}
+	bin := filepath.Join(wt, "target", "debug", "colibri")
+	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin, src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+	}()
+
+	found := RunningFrom(wt)
+	if len(found) != 1 {
+		t.Fatalf("RunningFrom = %+v, want the live process", found)
+	}
+	if found[0].PID != cmd.Process.Pid || found[0].Name != "colibri" {
+		t.Errorf("got %+v, want pid %d named colibri", found[0], cmd.Process.Pid)
+	}
+}
+
+// TestRunningFromFindsAProcessBehindASymlink is the case the first version of
+// this guard missed, and the one that matters most: a worktree still on the old
+// shared-cache wiring runs its binary through a symlink, so /proc resolves the
+// exe to the shared cache and a prefix test on the worktree finds nothing. That
+// pointed the guard away from exactly the worktrees most likely to have a live
+// dev session.
+func TestRunningFromFindsAProcessBehindASymlink(t *testing.T) {
+	wt := worktree(t)
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep binary")
+	}
+	src, err := os.ReadFile(sleep)
+	if err != nil {
+		t.Skip("cannot read sleep binary")
+	}
+	// The artifact lives outside the worktree, as a shared cache's would.
+	shared := filepath.Join(t.TempDir(), "colibri-aaaa1111")
+	if err := os.WriteFile(shared, src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(wt, "target", "debug", "colibri")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(shared, link); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(link, "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+	}()
+
+	found := RunningFrom(wt)
+	if len(found) != 1 || found[0].PID != cmd.Process.Pid {
+		t.Fatalf("RunningFrom = %+v, want pid %d", found, cmd.Process.Pid)
+	}
+}
+
 // TestSupersededTargetsIgnoresNonCargoDirs guards the removal: `target` is an
 // ordinary enough directory name that rwt clean must confirm cargo owns it
 // before deleting it.
