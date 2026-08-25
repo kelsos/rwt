@@ -95,11 +95,18 @@ func reportHooks(ctx context.Context) {
 		fmt.Printf("hooks: not rwt's; core.hooksPath is %s\n", state.HooksPath)
 	}
 	if state.PreviousBroken {
-		path := state.HooksPath
+		// Two different facts wear the same sentence, and conflating them reads
+		// as "the hooks you just installed run nothing". When rwt is installed
+		// the broken path is the one it displaced and chains to, so the hooks
+		// work and only the chained-to mechanism is dead. When rwt is not
+		// installed, the broken path IS core.hooksPath and nothing runs at all.
 		if state.Installed {
-			path = state.Previous
+			fmt.Printf("       note: the displaced %s does not exist, so nothing is chained after rwt's checks\n",
+				state.Previous)
+		} else {
+			fmt.Printf("       warning: %s does not exist, so git is running no hooks at all\n",
+				state.HooksPath)
 		}
-		fmt.Printf("       warning: %s does not exist, so it runs nothing\n", path)
 	}
 	for _, base := range rotki.LongLived {
 		wt := filepath.Join(rotki.UmbrellaRoot(), base)
@@ -108,7 +115,7 @@ func reportHooks(ctx context.Context) {
 		}
 		if _, err := os.Stat(filepath.Join(wt, ".venv", "bin", "ruff")); err != nil {
 			fmt.Printf("       %s has no Python lint group; `rwt check` will skip ruff/mypy there\n", base)
-			fmt.Printf("       fix with: rwt setup %s --only uv --lint\n", base)
+			fmt.Printf("       fix with: rwt setup %s --only uv\n", base)
 			break
 		}
 	}
