@@ -102,10 +102,10 @@ type Skip struct {
 // into a package install and never fails over a missing dependency.
 const VenvBin = ".venv/bin/"
 
-// LintGroupFix is the command that installs the Python lint tools. They are not
-// part of the default `uv sync`, so a worktree warmed by `rwt new` has none of
-// them until this is run.
-const LintGroupFix = "rwt setup <worktree> --only uv --lint"
+// LintGroupFix is the command that installs the Python lint tools. rwt now syncs
+// every dependency group, so this only comes up for a worktree warmed before
+// that: re-running the uv step is all it takes.
+const LintGroupFix = "rwt setup <worktree> --only uv"
 
 // Catalog is every check rwt knows how to run, in tier order.
 //

@@ -116,6 +116,35 @@ func TestDefaultStepsFollowTheRootWorkspace(t *testing.T) {
 	}
 }
 
+// TestDefaultStepsSyncEveryDependencyGroup pins the fix for a gap that hid for a
+// long time. The lint group was opt-in behind `setup --lint`, `rwt new` never
+// asked for it, and `rwt check` skips a check whose tool is missing rather than
+// failing — so ruff and mypy were absent from nearly every worktree and the
+// Python gates were quietly not running while the check reported success.
+// Anything less than every group brings that back.
+func TestDefaultStepsSyncEveryDependencyGroup(t *testing.T) {
+	wt := t.TempDir()
+
+	var uv []string
+	for _, s := range DefaultSteps(wt) {
+		if s.Eco == EcoUv {
+			uv = s.Argv
+		}
+	}
+	if uv == nil {
+		t.Fatal("no uv step in DefaultSteps")
+	}
+	joined := strings.Join(uv, " ")
+	if !strings.Contains(joined, "--all-groups") {
+		t.Errorf("uv step does not sync every group: %q", joined)
+	}
+	// --frozen has to survive: the sync must honour the lockfile rather than
+	// resolving, or a warm-up could quietly move dependencies.
+	if !strings.Contains(joined, "--frozen") {
+		t.Errorf("uv step no longer syncs from the lockfile: %q", joined)
+	}
+}
+
 // TestOnlySelectsByEcosystem is the point of the Eco tag: a Rust selector has to
 // keep working across both layouts, where the step's Name is "rotki" on one and
 // "colibri"/"crates" on the other.
