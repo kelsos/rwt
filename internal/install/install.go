@@ -60,22 +60,21 @@ type Step struct {
 // generated .cargo/config.toml: discovery walks up from the cwd, so a config at
 // the workspace root is only seen from inside it.
 func DefaultSteps(worktree string) []Step {
-	return stepsWith(worktree, false)
+	return stepsWith(worktree)
 }
 
-// StepsWithLint is DefaultSteps with the Python lint group added to the uv sync,
-// so ruff, mypy and friends land in the worktree's .venv. They are not in the
-// default sync and are on nobody's PATH, which is why `rwt check` cannot lint
-// Python in a worktree warmed without this.
-func StepsWithLint(worktree string) []Step {
-	return stepsWith(worktree, true)
-}
-
-func stepsWith(worktree string, lint bool) []Step {
-	uv := []string{"uv", "sync", "--frozen"}
-	if lint {
-		uv = append(uv, "--group", "lint")
-	}
+func stepsWith(worktree string) []Step {
+	// --all-groups, so a worktree gets every dependency group rotki declares
+	// (dev, lint, docs, packaging, profiling, ci) rather than the default set.
+	//
+	// The lint group used to be opt-in behind `setup --lint`, and the result was
+	// that essentially no worktree had it: `rwt new` never asked for it, so ruff
+	// and mypy were absent from almost every .venv. `rwt check` degrades quietly
+	// when a tool is missing — it skips the step — so the Python gates were being
+	// skipped everywhere while the run still reported success. With rwt's hooks
+	// installed that silence reaches every commit, which is not a trade worth the
+	// install time it saves.
+	uv := []string{"uv", "sync", "--frozen", "--all-groups"}
 	steps := []Step{
 		{Name: "pnpm", Eco: EcoPnpm, Dir: "frontend", Argv: []string{"pnpm", "install", "--frozen-lockfile", "--prefer-offline"}},
 		{Name: "uv", Eco: EcoUv, Dir: ".", Argv: uv},

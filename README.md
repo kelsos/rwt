@@ -252,14 +252,22 @@ reports what it skipped and why rather than running a command that is not there:
 
 ```
 skip knip: frontend/package.json has no "knip" script on this base
-skip ruff: .venv/bin/ruff is not present in this worktree; install it with: rwt setup <worktree> --only uv --lint
+skip ruff: .venv/bin/ruff is not present in this worktree; install it with: rwt setup <worktree> --only uv
 ```
 
-That second one is worth knowing about: the Python lint tools are not part of the
-default `uv sync`, so a worktree warmed by `rwt new` has none of them. The checks
-gate on the tool being in the venv rather than letting `uv run` resolve it, so a
-commit never turns into a package install and never fails over a missing
-dependency instead of over your code. `rwt doctor` flags it too.
+The checks gate on the tool being in the venv rather than letting `uv run`
+resolve it, so a commit never turns into a package install and never fails over a
+missing dependency instead of over your code. `rwt doctor` flags it too.
+
+That skip used to be the normal state rather than an edge case, and it is worth
+knowing why. The Python lint group was opt-in behind `setup --lint`, and `rwt
+new` never asked for it, so ruff and mypy were missing from nearly every
+worktree — and because a missing tool is *skipped* rather than failed, the Python
+gates were quietly not running while `rwt check` still reported success. rwt now
+syncs **every** dependency group rotki declares (`dev`, `lint`, `docs`,
+`packaging`, `profiling`, `ci`) with `uv sync --frozen --all-groups`, so a warmed
+worktree has the whole toolchain. A worktree warmed before that change just needs
+its uv step re-run.
 
 ### Install
 

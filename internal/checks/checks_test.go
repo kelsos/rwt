@@ -157,7 +157,7 @@ func TestPlanSkipsPythonChecksWithoutTheLintGroup(t *testing.T) {
 			reason = s.Reason
 		}
 	}
-	if !strings.Contains(reason, "--lint") {
+	if !strings.Contains(reason, LintGroupFix) {
 		t.Errorf("the skip should name the command that fixes it, got %q", reason)
 	}
 }
