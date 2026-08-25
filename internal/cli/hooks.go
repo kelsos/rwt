@@ -119,7 +119,11 @@ func hooksStatusCmd() *cobra.Command {
 				fmt.Printf("displaced:      %s\n", state.Previous)
 			}
 			if state.PreviousBroken {
-				fmt.Println("warning:        that path does not exist, so it runs nothing")
+				if state.Installed {
+					fmt.Println("note:           that path does not exist, so nothing is chained after rwt's checks")
+				} else {
+					fmt.Println("warning:        that path does not exist, so git is running no hooks at all")
+				}
 			}
 			if !state.Installed {
 				fmt.Println("\ninstall with: rwt hooks install")
