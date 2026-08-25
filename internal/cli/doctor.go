@@ -154,8 +154,43 @@ func reportCargoCache(ctx context.Context) (collided bool) {
 			fmt.Printf("       nothing builds into it now; reclaim it with: rwt clean --cache\n")
 		}
 	}
+	reportBasedirs(paths(wts))
 	reportIncremental()
 	return reportCollisions(paths(wts))
+}
+
+// reportBasedirs reports whether sccache is set up to reuse compilations across
+// worktrees, which is invisible otherwise: without basedirs it caches happily,
+// reports healthy stats, and simply never hits from another worktree. That state
+// looked exactly like a working cache for as long as rwt shipped it.
+func reportBasedirs(worktrees []string) {
+	if cargocache.Wrapper() == "" {
+		return
+	}
+	path, err := cargocache.SccacheConfigPath()
+	if err != nil {
+		return
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Printf("\nsccache: no config at %s, so it cannot hit across worktrees\n", path)
+		fmt.Println("       fix with: rwt clean")
+		return
+	}
+	var missing []string
+	for _, wt := range worktrees {
+		if !strings.Contains(string(body), `"`+wt+`"`) {
+			missing = append(missing, filepath.Base(wt))
+		}
+	}
+	if len(missing) == 0 {
+		fmt.Printf("\nsccache: basedirs cover all %d worktree(s)\n", len(worktrees))
+		return
+	}
+	fmt.Printf("\nsccache: %d worktree(s) missing from basedirs: %s\n",
+		len(missing), strings.Join(missing, ", "))
+	fmt.Println("       they compile without reusing anything the others built")
+	fmt.Println("       fix with: rwt clean")
 }
 
 // reportIncremental warns about CARGO_INCREMENTAL being exported, which is fatal

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/kelsos/rwt/internal/cargocache"
 	"github.com/kelsos/rwt/internal/git"
@@ -16,6 +17,7 @@ func cleanCmd() *cobra.Command {
 	var (
 		dryRun bool
 		cache  bool
+		deep   bool
 	)
 	cmd := &cobra.Command{
 		Use:   "clean [name|.]",
@@ -26,9 +28,10 @@ func cleanCmd() *cobra.Command {
 			"This is also the migration off the shared cargo cache: wiring a worktree\n" +
 			"drops the launcher symlinks that pointed into it, which is what stopped\n" +
 			"several worktrees from running one another's binaries.\n\n" +
-			"<worktree>/target itself is never reclaimed. It is the live build\n" +
-			"directory now, and removing it would only buy back disk in exchange for\n" +
-			"a cold rebuild. Use `cargo clean` in a worktree for that.\n\n" +
+			"<worktree>/target is left alone by default. It is the live build\n" +
+			"directory now, so reclaiming it buys back disk in exchange for a cold\n" +
+			"rebuild (~50s per worktree). --deep does it anyway, for when the disk\n" +
+			"matters more; worktrees with a running dev session are skipped.\n\n" +
 			"With no argument every worktree under the umbrella is cleaned; pass a\n" +
 			"name (or '.') to limit it to one.\n\n" +
 			"--cache drops the old shared cache root, which is where the reclaimable\n" +
@@ -36,15 +39,16 @@ func cleanCmd() *cobra.Command {
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: completeWorktreeNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runClean(cmd.Context(), args, dryRun, cache)
+			return runClean(cmd.Context(), args, dryRun, cache, deep)
 		},
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report what would be removed without removing it")
 	cmd.Flags().BoolVar(&cache, "cache", false, "also drop the old shared cache root that nothing builds into now")
+	cmd.Flags().BoolVar(&deep, "deep", false, "also reclaim each worktree's live target dir (costs a cold rebuild)")
 	return cmd
 }
 
-func runClean(ctx context.Context, args []string, dryRun, cache bool) error {
+func runClean(ctx context.Context, args []string, dryRun, cache, deep bool) error {
 	worktrees, err := cleanTargets(ctx, args)
 	if err != nil {
 		return err
@@ -52,6 +56,9 @@ func runClean(ctx context.Context, args []string, dryRun, cache bool) error {
 
 	var reclaimed int64
 	for _, wt := range worktrees {
+		if deep {
+			reclaimed += deepClean(wt, dryRun)
+		}
 		// Wire before removing: it is what redirects the worktree onto its own
 		// target dir and drops the symlinks into the old shared cache.
 		// Unconditional, since a worktree with nothing left to reclaim still
@@ -98,6 +105,43 @@ func runClean(ctx context.Context, args []string, dryRun, cache bool) error {
 	}
 	fmt.Printf("\n%s %s\n", verb, cargocache.HumanBytes(reclaimed))
 	return nil
+}
+
+// deepClean reclaims a worktree's live target dir, returning the bytes freed.
+//
+// Skipped outright when something is running out of it. rotki's starling
+// supervises colibri and restarts it, so removing the directory under a live dev
+// session leaves the supervisor respawning a binary that is no longer there —
+// and Linux unlinks a running executable without any complaint that would make
+// the cause obvious. Reporting the pid is more use than a generic refusal.
+//
+// Reclaim rather than RemoveAll, so target/backend (the frozen python core the
+// e2e run builds, which cargo never wrote and which is slow to rebuild) survives
+// here exactly as it does for the superseded dirs.
+func deepClean(worktree string, dryRun bool) int64 {
+	if running := cargocache.RunningFrom(worktree); len(running) > 0 {
+		var who []string
+		for _, r := range running {
+			who = append(who, fmt.Sprintf("%s (pid %d)", r.Name, r.PID))
+		}
+		fmt.Printf("skipped %s: %s running from its target dir\n",
+			filepath.Base(worktree), strings.Join(who, ", "))
+		return 0
+	}
+	dir := cargocache.TargetDir(worktree)
+	freed, err := cargocache.Reclaim(dir, dryRun)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not fully reclaim %s: %v\n", dir, err)
+	}
+	if freed > 0 {
+		verb := "reclaimed"
+		if dryRun {
+			verb = "would reclaim"
+		}
+		fmt.Printf("%s the target dir of %s (%s)\n",
+			verb, filepath.Base(worktree), cargocache.HumanBytes(freed))
+	}
+	return freed
 }
 
 // cleanTargets resolves the argument to the worktrees to clean: one named
