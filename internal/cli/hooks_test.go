@@ -154,6 +154,34 @@ func TestHooksOptOutIsPerWorktree(t *testing.T) {
 	}
 }
 
+// TestHooksRunAcceptsGitsHookArguments pins the arity of the entry point git
+// calls. git hands pre-push a remote and a url, and the shim forwards them, so
+// a run that only accepts the stage rejects every push with an argument-count
+// error that reads like a permissions or network failure.
+func TestHooksRunAcceptsGitsHookArguments(t *testing.T) {
+	umbrella := hooksUmbrella(t)
+	ctx := context.Background()
+	develop := filepath.Join(umbrella, "develop")
+	if _, err := hooks.Install(ctx, develop, false); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	// Opted out, so this exercises the argument plumbing alone.
+	if err := hooks.SetOptOut(ctx, develop, true); err != nil {
+		t.Fatalf("opt out: %v", err)
+	}
+	t.Chdir(develop)
+
+	if err := runCLI(t, "hooks", "run", "pre-push", "origin", "git@github.com:rotki/rotki.git"); err != nil {
+		t.Errorf("pre-push with git's own arguments: %v", err)
+	}
+	if err := runCLI(t, "hooks", "run", "pre-commit"); err != nil {
+		t.Errorf("pre-commit: %v", err)
+	}
+	if err := runCLI(t, "hooks", "run"); err == nil {
+		t.Error("a run with no stage should still be an error")
+	}
+}
+
 // TestCheckPlansFromStagedFiles drives `rwt check` end to end at the pre-commit
 // stage and asserts the plan follows what is actually staged.
 func TestCheckPlansFromStagedFiles(t *testing.T) {

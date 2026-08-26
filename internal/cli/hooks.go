@@ -174,13 +174,16 @@ func hooksToggleCmd(name string, off bool) *cobra.Command {
 // git, not a command to type.
 func hooksRunCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:    "run <" + stagePreCommit + "|" + stagePrePush + ">",
+		Use:    "run <" + stagePreCommit + "|" + stagePrePush + "> [hook args...]",
 		Short:  "Run a stage's checks (called by the installed hook)",
 		Hidden: true,
-		Args:   cobra.ExactArgs(1),
+		// git passes each hook its own arguments (pre-push gets remote and url),
+		// and the shim forwards them. They are not ours to interpret, but they
+		// belong to the hook we chain to, so accept and carry them.
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			stage := args[0]
+			stage, hookArgs := args[0], args[1:]
 			if stage != stagePreCommit && stage != stagePrePush {
 				return fmt.Errorf("unknown stage %q", stage)
 			}
@@ -189,25 +192,25 @@ func hooksRunCmd() *cobra.Command {
 				return err
 			}
 			if hooks.OptedOut(ctx, wt) {
-				return chain(ctx, wt, stage)
+				return chain(ctx, wt, stage, hookArgs)
 			}
 			opts := checkOpts{quiet: true, full: stage == stagePrePush && hookDepth()}
 			if err := runCheck(ctx, wt, stage, opts); err != nil {
 				return err
 			}
-			return chain(ctx, wt, stage)
+			return chain(ctx, wt, stage, hookArgs)
 		},
 	}
 }
 
 // chain hands off to the hook rwt displaced, replacing this process so the
-// other mechanism sees git's own stdin and exit status untouched.
-func chain(ctx context.Context, wt, stage string) error {
+// other mechanism sees git's own stdin, arguments and exit status untouched.
+func chain(ctx context.Context, wt, stage string, hookArgs []string) error {
 	path := hooks.Chained(ctx, wt, stage)
 	if path == "" {
 		return nil
 	}
-	return syscall.Exec(path, []string{path}, os.Environ())
+	return syscall.Exec(path, append([]string{path}, hookArgs...), os.Environ())
 }
 
 // hostWorktree is where the umbrella-wide git config lives. Prefer the worktree
