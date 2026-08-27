@@ -37,25 +37,38 @@ func targetedTests(worktree string, c Check, changed []string) []string {
 	return slices.Compact(out)
 }
 
-// frontendSpecs resolves changed frontend files to vitest specs. The paths are
-// returned relative to `frontend/`, which is the cwd the test:unit script pins.
+// vitestRoot is the directory vitest resolves its filters against. The check
+// runs `pnpm run test:unit` from frontend/, but that script is a workspace
+// filter (`pnpm run --filter rotki test:unit:run`), so vitest itself starts in
+// frontend/app. A path relative to frontend/ matches no test file there, and
+// vitest treats "no file matched" as a failed run, which red-gates the push.
+const vitestRoot = "frontend/app"
+
+// frontendSpecs resolves changed frontend files to vitest specs, returned
+// relative to vitestRoot.
 //
 // A changed spec runs itself. A changed source file runs its sibling spec if
 // there is one, and otherwise every spec sitting in the same directory, which is
 // where this repo keeps them.
+//
+// Only the app package maps: it holds every spec test:unit can reach.
+// frontend/common has no specs at all, and dev-proxy's three are the test:proxy
+// check's, not this one's. A change confined to either maps to nothing and
+// drops the check, which is the honest outcome rather than a filter that
+// matches nothing.
 func frontendSpecs(worktree string, changed []string) []string {
 	var out []string
 	for _, p := range changed {
-		if !strings.HasPrefix(p, "frontend/") || !isTS(p) {
+		if !strings.HasPrefix(p, vitestRoot+"/") || !isTS(p) {
 			continue
 		}
-		rel := strings.TrimPrefix(p, "frontend/")
+		rel := strings.TrimPrefix(p, vitestRoot+"/")
 		if isSpec(rel) {
 			out = append(out, rel)
 			continue
 		}
 		sibling := strings.TrimSuffix(rel, filepath.Ext(rel)) + ".spec.ts"
-		if exists(worktree, "frontend", sibling) {
+		if exists(worktree, vitestRoot, sibling) {
 			out = append(out, sibling)
 			continue
 		}
@@ -65,9 +78,9 @@ func frontendSpecs(worktree string, changed []string) []string {
 }
 
 // specsIn lists the spec files directly inside a directory, relative to
-// frontend/.
+// vitestRoot.
 func specsIn(worktree, dir string) []string {
-	entries, err := os.ReadDir(filepath.Join(worktree, "frontend", dir))
+	entries, err := os.ReadDir(filepath.Join(worktree, vitestRoot, dir))
 	if err != nil {
 		return nil
 	}

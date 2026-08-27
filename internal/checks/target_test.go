@@ -61,12 +61,12 @@ func TestFrontendSpecsPreferTheSibling(t *testing.T) {
 
 	planned, _ := Plan(wt, []string{"frontend/app/src/a.ts"}, []Tier{TierHeavy})
 	got := appended(t, "vitest", find(t, planned, "vitest").Argv)
-	want := filepath.Join("app", "src", "a.spec.ts")
+	want := filepath.Join("src", "a.spec.ts")
 	if len(got) != 1 || got[0] != want {
 		t.Errorf("got %v, want just %q", got, want)
 	}
 
-	// No sibling: fall back to the specs beside it, paths relative to frontend/.
+	// No sibling: fall back to the specs beside it.
 	write(t, filepath.Join(wt, "frontend", "app", "src", "c.ts"), "")
 	planned, _ = Plan(wt, []string{"frontend/app/src/c.ts"}, []Tier{TierHeavy})
 	got = appended(t, "vitest", find(t, planned, "vitest").Argv)
@@ -75,14 +75,37 @@ func TestFrontendSpecsPreferTheSibling(t *testing.T) {
 	}
 }
 
-// TestFrontendSpecIsRelativeToFrontend pins the path base. The test:unit script
-// pins its cwd to frontend/, so a repo-root path would not resolve.
-func TestFrontendSpecIsRelativeToFrontend(t *testing.T) {
+// TestFrontendSpecIsRelativeToVitestRoot pins the path base. The check runs from
+// frontend/, but test:unit is a workspace filter, so vitest starts in
+// frontend/app. A path carrying the app/ prefix matches no test file, and vitest
+// exits 1 on an empty filter, so getting this wrong red-gates every frontend
+// push rather than failing quietly.
+func TestFrontendSpecIsRelativeToVitestRoot(t *testing.T) {
 	wt := develop(t)
 	write(t, filepath.Join(wt, "frontend", "app", "src", "x.spec.ts"), "")
 	planned, _ := Plan(wt, []string{"frontend/app/src/x.spec.ts"}, []Tier{TierHeavy})
 	got := appended(t, "vitest", find(t, planned, "vitest").Argv)
-	if len(got) != 1 || got[0] != "app/src/x.spec.ts" {
-		t.Errorf("got %v, want a path relative to frontend/", got)
+	if len(got) != 1 || got[0] != "src/x.spec.ts" {
+		t.Errorf("got %v, want a path relative to frontend/app", got)
+	}
+}
+
+// TestFrontendSpecsIgnoreSiblingPackages: test:unit only reaches the app
+// package. common has no specs, and dev-proxy's belong to test:proxy, so a
+// change confined to either must drop the check instead of handing vitest a
+// filter that matches nothing.
+func TestFrontendSpecsIgnoreSiblingPackages(t *testing.T) {
+	wt := develop(t)
+	write(t, filepath.Join(wt, "frontend", "common", "src", "y.ts"), "")
+	write(t, filepath.Join(wt, "frontend", "dev-proxy", "src", "z.spec.ts"), "")
+
+	planned, _ := Plan(wt, []string{
+		"frontend/common/src/y.ts",
+		"frontend/dev-proxy/src/z.spec.ts",
+	}, []Tier{TierHeavy})
+	for _, c := range planned {
+		if c.Name == "vitest" {
+			t.Errorf("vitest should not be planned, got argv %v", c.Argv)
+		}
 	}
 }
