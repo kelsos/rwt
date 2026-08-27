@@ -22,6 +22,7 @@ func fixture(t *testing.T, scripts ...string) string {
 		`{"scripts": {`+strings.Join(quoted, ",")+`}}`)
 	write(t, filepath.Join(dir, "Cargo.toml"), "[workspace]\nmembers = []\n")
 	write(t, filepath.Join(dir, "tools", "lint_checksum_addresses.py"), "")
+	write(t, filepath.Join(dir, "tools", "checksum_evm_addresses.py"), "")
 	write(t, filepath.Join(dir, "tools", "lint_new_logging_fstrings.py"), "")
 	// A .venv with the lint group synced, which `rwt new` does not produce.
 	for _, tool := range []string{"python", "ruff", "mypy", "double-indent"} {
@@ -159,6 +160,47 @@ func TestPlanSkipsPythonChecksWithoutTheLintGroup(t *testing.T) {
 	}
 	if !strings.Contains(reason, LintGroupFix) {
 		t.Errorf("the skip should name the command that fixes it, got %q", reason)
+	}
+}
+
+// TestPlanSkipsScriptChecksMissingTheirTool covers the checks that shell out
+// through a tools/ wrapper. Gating on the wrapper and the interpreter is not
+// enough: logging-fstrings runs `ruff` itself, so a worktree without it does not
+// skip, it fails the push with a FileNotFoundError that reads like a real
+// violation of the rule being checked.
+func TestPlanSkipsScriptChecksMissingTheirTool(t *testing.T) {
+	wt := develop(t)
+	if err := os.Remove(filepath.Join(wt, VenvBin, "ruff")); err != nil {
+		t.Fatal(err)
+	}
+	planned, skipped := Plan(wt, []string{"rotkehlchen/a.py"}, []Tier{TierStandard})
+	if has(planned, "logging-fstrings") {
+		t.Error("planned logging-fstrings with no ruff for it to call")
+	}
+	var reason string
+	for _, s := range skipped {
+		if s.Name == "logging-fstrings" {
+			reason = s.Reason
+		}
+	}
+	if !strings.Contains(reason, "ruff") || !strings.Contains(reason, LintGroupFix) {
+		t.Errorf("the skip should name ruff and how to install it, got %q", reason)
+	}
+}
+
+// TestPlanSkipsChecksumAddressesWithoutItsSibling: the wrapper re-invokes the
+// interpreter on tools/checksum_evm_addresses.py, so that file is a need too.
+func TestPlanSkipsChecksumAddressesWithoutItsSibling(t *testing.T) {
+	wt := develop(t)
+	if err := os.Remove(filepath.Join(wt, "tools", "checksum_evm_addresses.py")); err != nil {
+		t.Fatal(err)
+	}
+	planned, _ := Plan(wt, []string{"rotkehlchen/a.py"}, []Tier{TierFast})
+	if has(planned, "checksum-addresses") {
+		t.Error("planned checksum-addresses without the script it runs")
+	}
+	if !has(planned, "ruff") {
+		t.Errorf("one missing script must not drop the others: %v", names(planned))
 	}
 }
 

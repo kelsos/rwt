@@ -142,9 +142,15 @@ func Catalog() []Check {
 		},
 		{
 			Name: "checksum-addresses", Group: rotki.GroupBackend, Tier: TierFast, Dir: ".",
-			Argv:  []string{"uv", "run", "python", "tools/lint_checksum_addresses.py"},
-			Needs: []string{"tools/lint_checksum_addresses.py", VenvBin + "python"},
-			Fix:   "rwt setup <worktree>", CIJob: "lint-backend",
+			Argv: []string{"uv", "run", "python", "tools/lint_checksum_addresses.py"},
+			// Same rule as logging-fstrings: the wrapper re-invokes the
+			// interpreter on a sibling script, so that script is a need too.
+			Needs: []string{
+				"tools/lint_checksum_addresses.py",
+				"tools/checksum_evm_addresses.py",
+				VenvBin + "python",
+			},
+			Fix: "rwt setup <worktree>", CIJob: "lint-backend",
 		},
 		{
 			Name: "cargo-fmt", Group: rotki.GroupStarling, Tier: TierFast, Dir: ".",
@@ -191,9 +197,17 @@ func Catalog() []Check {
 			// Already diff-scoped in CI via LINT_DIFF_BASE, which is what makes
 			// it a natural hook check rather than a whole-tree pass.
 			Name: "logging-fstrings", Group: rotki.GroupBackend, Tier: TierStandard, Dir: ".",
-			Argv:  []string{"uv", "run", "python", "tools/lint_new_logging_fstrings.py"},
-			Needs: []string{"tools/lint_new_logging_fstrings.py", VenvBin + "python"},
-			Fix:   "rwt setup <worktree>", CIJob: "lint-backend",
+			Argv: []string{"uv", "run", "python", "tools/lint_new_logging_fstrings.py"},
+			// The script shells out to `ruff` itself, so gating on the
+			// interpreter alone is not enough: without ruff in the venv this
+			// does not skip, it dies with FileNotFoundError and a reproduce
+			// line that reads like a real G004 violation.
+			Needs: []string{
+				"tools/lint_new_logging_fstrings.py",
+				VenvBin + "python",
+				VenvBin + "ruff",
+			},
+			Fix: LintGroupFix, CIJob: "lint-backend",
 		},
 		{
 			Name: "clippy-colibri", Group: rotki.GroupColibri, Tier: TierStandard, Dir: ".",
