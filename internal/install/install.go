@@ -76,7 +76,16 @@ func stepsWith(worktree string) []Step {
 	// install time it saves.
 	uv := []string{"uv", "sync", "--frozen", "--all-groups"}
 	steps := []Step{
-		{Name: "pnpm", Eco: EcoPnpm, Dir: "frontend", Argv: []string{"pnpm", "install", "--frozen-lockfile", "--prefer-offline"}},
+		{
+			Name: "pnpm",
+			Eco:  EcoPnpm,
+			Dir:  "frontend",
+			Argv: []string{"pnpm", "install", "--frozen-lockfile", "--prefer-offline"},
+			// See backdatePatchMtimes: without this a fresh worktree reinstalls on
+			// every `pnpm run`, and gates running concurrently then fight over the
+			// native module rebuild that reinstall triggers.
+			Before: func() error { return backdatePatchMtimes(worktree) },
+		},
 		{Name: "uv", Eco: EcoUv, Dir: ".", Argv: uv},
 	}
 	for _, ws := range cargocache.Workspaces(worktree) {
