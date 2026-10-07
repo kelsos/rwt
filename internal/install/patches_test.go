@@ -3,6 +3,7 @@ package install
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -50,6 +51,36 @@ func TestBackdatePatchMtimesPutsPatchesBeforeNow(t *testing.T) {
 			t.Errorf("%s: mtime %v is not at least %v before the install stamp",
 				filepath.Base(path), info.ModTime(), minMargin)
 		}
+	}
+}
+
+// TestBackdatePatchMtimesPutsPatchesBeforeAnExistingStamp covers `rwt setup` on
+// an installed worktree: the install that follows is a no-op and keeps the old
+// stamp, so the patches must land before that stamp, not merely before now.
+func TestBackdatePatchMtimesPutsPatchesBeforeAnExistingStamp(t *testing.T) {
+	wt := t.TempDir()
+	path := writePatch(t, wt, "app-builder-lib.patch")
+	validated := time.Now().Add(-3 * time.Hour).Truncate(time.Millisecond)
+	state := filepath.Join(wt, workspaceStateFile)
+	if err := os.MkdirAll(filepath.Dir(state), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	body := []byte(`{"lastValidatedTimestamp":` + strconv.FormatInt(validated.UnixMilli(), 10) + `}`)
+	if err := os.WriteFile(state, body, 0o644); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+
+	if err := backdatePatchMtimes(wt); err != nil {
+		t.Fatalf("backdatePatchMtimes: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	// Literal margin, for the same reason as in the test above.
+	if latest := validated.Add(-time.Second); !info.ModTime().Before(latest) {
+		t.Errorf("mtime %v is not at least 1s before the existing stamp %v", info.ModTime(), validated)
 	}
 }
 
