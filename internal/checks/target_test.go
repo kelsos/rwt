@@ -90,6 +90,26 @@ func TestFrontendSpecIsRelativeToVitestRoot(t *testing.T) {
 	}
 }
 
+// TestFrontendSpecsSkipPlaywright: vitest.config.ts excludes tests/e2e, so an
+// e2e spec handed to vitest matches nothing and red-gates the push. Neither a
+// changed e2e spec nor an e2e helper (whose directory fallback would find e2e
+// specs) may plan vitest.
+func TestFrontendSpecsSkipPlaywright(t *testing.T) {
+	wt := develop(t)
+	write(t, filepath.Join(wt, "frontend", "app", "tests", "e2e", "specs", "a.spec.ts"), "")
+	write(t, filepath.Join(wt, "frontend", "app", "tests", "e2e", "specs", "helper.ts"), "")
+
+	planned, _ := Plan(wt, []string{
+		"frontend/app/tests/e2e/specs/a.spec.ts",
+		"frontend/app/tests/e2e/specs/helper.ts",
+	}, []Tier{TierHeavy})
+	for _, c := range planned {
+		if c.Name == "vitest" {
+			t.Errorf("vitest should not be planned for e2e files, got argv %v", c.Argv)
+		}
+	}
+}
+
 // TestFrontendSpecsIgnoreSiblingPackages: test:unit only reaches the app
 // package. common has no specs, and dev-proxy's belong to test:proxy, so a
 // change confined to either must drop the check instead of handing vitest a

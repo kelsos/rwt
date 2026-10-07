@@ -44,12 +44,20 @@ func targetedTests(worktree string, c Check, changed []string) []string {
 // vitest treats "no file matched" as a failed run, which red-gates the push.
 const vitestRoot = "frontend/app"
 
+// e2eRoot holds the Playwright suite, relative to vitestRoot. vitest.config.ts
+// excludes it, so a filter naming a file under it matches nothing and vitest
+// exits 1. Playwright specs share the .spec.ts suffix, so the suffix alone
+// cannot tell them apart.
+const e2eRoot = "tests/e2e/"
+
 // frontendSpecs resolves changed frontend files to vitest specs, returned
 // relative to vitestRoot.
 //
 // A changed spec runs itself. A changed source file runs its sibling spec if
 // there is one, and otherwise every spec sitting in the same directory, which is
 // where this repo keeps them.
+//
+// Playwright files under e2eRoot never map: vitest excludes them.
 //
 // Only the app package maps: it holds every spec test:unit can reach.
 // frontend/common has no specs at all, and dev-proxy's three are the test:proxy
@@ -63,6 +71,9 @@ func frontendSpecs(worktree string, changed []string) []string {
 			continue
 		}
 		rel := strings.TrimPrefix(p, vitestRoot+"/")
+		if strings.HasPrefix(rel, e2eRoot) {
+			continue
+		}
 		if isSpec(rel) {
 			out = append(out, rel)
 			continue
