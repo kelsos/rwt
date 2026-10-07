@@ -119,6 +119,59 @@ func TestRmMergedSweepsRebaseMerged(t *testing.T) {
 	}
 }
 
+// TestRmAcceptsAMergedPRHead covers a squash-merged PR whose fork branch was
+// deleted: its commits are on no remote, ancestry and patch equivalence both
+// miss, and only the merged PR's head SHA proves nothing is lost. rm must accept
+// that, and still refuse once HEAD has moved past it.
+func TestRmAcceptsAMergedPRHead(t *testing.T) {
+	clearGitEnv(t)
+	umbrella := setupUmbrella(t)
+	t.Setenv("RWT_UMBRELLA", umbrella)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	origInstall, origClean, origHeads := installRun, devWebClean, mergedPRHeads
+	installRun = func(context.Context, string, install.Opts) error { return nil }
+	devWebClean = func(context.Context, string, string) error { return nil }
+	var prHead string
+	mergedPRHeads = func(context.Context, string, string) []string { return []string{prHead} }
+	t.Cleanup(func() { installRun, devWebClean, mergedPRHeads = origInstall, origClean, origHeads })
+
+	if err := runCLI(t, "new", "squashed", "--from", "develop"); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	wt := filepath.Join(umbrella, "feat-squashed")
+	writeFile(t, filepath.Join(wt, "work.txt"), "the work\n")
+	gitRun(t, wt, "add", "-A")
+	gitRun(t, wt, "commit", "-q", "-m", "the work")
+
+	// A merged PR whose head is an older commit: HEAD has unmerged work.
+	prHead = gitOut(t, wt, "rev-parse", "HEAD~1")
+	if err := runCLI(t, "rm", "squashed"); err == nil {
+		t.Fatal("rm removed a worktree whose HEAD is past the merged PR head")
+	}
+
+	prHead = gitOut(t, wt, "rev-parse", "HEAD")
+	if err := runCLI(t, "rm", "squashed"); err != nil {
+		t.Fatalf("rm with HEAD equal to the merged PR head: %v", err)
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Errorf("worktree still present: %v", err)
+	}
+}
+
+func TestGithubRepo(t *testing.T) {
+	for url, want := range map[string]string{
+		"git@github.com:rotki/rotki.git":     "rotki/rotki",
+		"https://github.com/rotki/rotki.git": "rotki/rotki",
+		"https://github.com/rotki/rotki":     "rotki/rotki",
+		"https://gitlab.com/rotki/rotki.git": "",
+	} {
+		if got := githubRepo(url); got != want {
+			t.Errorf("githubRepo(%q) = %q, want %q", url, got, want)
+		}
+	}
+}
+
 // TestGuardRefusesWithoutUmbrella confirms umbrella-touching commands refuse
 // when no location is configured, while config/doctor stay usable.
 func TestGuardRefusesWithoutUmbrella(t *testing.T) {

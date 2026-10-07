@@ -29,6 +29,54 @@ var devWebClean = func(ctx context.Context, frontendDir, name string) error {
 	return cmd.Run()
 }
 
+// mergedPRHeads returns the head SHAs of the upstream repo's merged PRs whose
+// head branch is branch, or nil when gh is missing or the lookup fails. A
+// package var so tests can stub it without network access.
+var mergedPRHeads = func(ctx context.Context, wt, branch string) []string {
+	url, ok := git.ConfigGet(ctx, wt, "remote."+rotki.Upstream+".url")
+	if !ok {
+		return nil
+	}
+	repo := githubRepo(url)
+	if repo == "" {
+		return nil
+	}
+	out, err := exec.CommandContext(ctx, "gh", "pr", "list", "--repo", repo, "--head", branch,
+		"--state", "merged", "--json", "headRefOid", "--jq", ".[].headRefOid").Output()
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(out))
+}
+
+// githubRepo turns a GitHub remote URL (ssh or https) into OWNER/REPO.
+func githubRepo(url string) string {
+	_, rest, ok := strings.Cut(url, "github.com")
+	if !ok {
+		return ""
+	}
+	repo := strings.TrimSuffix(strings.TrimLeft(rest, ":/"), ".git")
+	if strings.Count(repo, "/") != 1 {
+		return ""
+	}
+	return repo
+}
+
+// landedAsMergedPR reports whether the branch's current HEAD is the head of a
+// merged upstream PR.
+//
+// rotki squash-merges, so neither ancestry nor patch equivalence sees a
+// multi-commit branch upstream, and once the fork branch is deleted after the
+// merge every commit reads as unpushed. The merged PR's head SHA is the one
+// signal left: equal to HEAD means nothing was added after the merge.
+func landedAsMergedPR(ctx context.Context, wt, branch string) bool {
+	out, err := exec.CommandContext(ctx, "git", "-C", wt, "rev-parse", branch).Output()
+	if err != nil {
+		return false
+	}
+	return slices.Contains(mergedPRHeads(ctx, wt, branch), strings.TrimSpace(string(out)))
+}
+
 func rmCmd() *cobra.Command {
 	var (
 		keepBranch  bool
@@ -179,7 +227,11 @@ func tearDownWorktree(ctx context.Context, host, wt, branch string, keepBranch, 
 			return fmt.Errorf("%s has uncommitted changes (use --force)", base)
 		}
 		if branch != "" && !merged && git.HasUnpushed(ctx, wt, branch) {
-			return fmt.Errorf("%s has unpushed commits (use --force)", base)
+			if !landedAsMergedPR(ctx, wt, branch) {
+				return fmt.Errorf("%s has unpushed commits (use --force)", base)
+			}
+			fmt.Printf("%s: HEAD is the head of a merged PR, removing\n", base)
+			merged = true
 		}
 	}
 
