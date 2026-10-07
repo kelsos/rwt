@@ -3,6 +3,7 @@ package checks
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -234,6 +235,18 @@ func TestPlanAppendsOnlyMatchingFiles(t *testing.T) {
 	typos := find(t, planned, "typos")
 	if got := appended(t, "typos", typos.Argv); len(got) != len(changed) {
 		t.Errorf("typos should get every changed path, got %v", got)
+	}
+}
+
+// TestTyposHonoursConfigExcludes: the hook names files explicitly, and typos
+// checks an explicit path even when _typos.toml excludes it (the locale JSON),
+// so without --force-exclude every non-English locale edit fails on its
+// existing translations while CI, which walks the repo, passes.
+func TestTyposHonoursConfigExcludes(t *testing.T) {
+	wt := develop(t)
+	planned, _ := Plan(wt, []string{"frontend/app/src/locales/fr.json"}, []Tier{TierFast})
+	if argv := find(t, planned, "typos").Argv; !slices.Contains(argv, "--force-exclude") {
+		t.Errorf("typos argv %v lacks --force-exclude", argv)
 	}
 }
 

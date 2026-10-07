@@ -118,8 +118,12 @@ func Catalog() []Check {
 	return []Check{
 		// ---- fast: pre-commit ----
 		{
+			// typos checks a path named on the command line even when
+			// _typos.toml excludes it, so every staged locale file would flag
+			// its existing translations. CI walks the repo and honours the
+			// exclude; --force-exclude makes the explicit paths do the same.
 			Name: "typos", Group: "", Tier: TierFast, Dir: ".",
-			Argv: []string{"typos"}, Files: FilesAppend, CIJob: "check-typos",
+			Argv: []string{"typos", "--force-exclude"}, Files: FilesAppend, CIJob: "check-typos",
 		},
 		{
 			// lint-staged reads the git index itself, so it needs no file
