@@ -116,8 +116,8 @@ release cycle you are), so picking the right base is on you.
 ## Capability detection
 
 The dev:web multi-instance feature lives on `develop`, not `bugfixes`. `rwt`
-detects it by file-stat (`frontend/scripts/dev-instance/index.ts`), not by
-branch name, and refuses to write `INSTANCE_NAME` into a checkout that would
+detects it by file-stat (the `frontend/scripts/dev-instance/` module directory,
+imported by `start-dev.ts`), not by branch name, and refuses to write `INSTANCE_NAME` into a checkout that would
 silently ignore it (no isolation). `--force-managed-env` overrides.
 
 `rwt ls --live` adds runtime state: it reads the app's port registry
@@ -268,6 +268,13 @@ syncs **every** dependency group rotki declares (`dev`, `lint`, `docs`,
 `packaging`, `profiling`, `ci`) with `uv sync --frozen --all-groups`, so a warmed
 worktree has the whole toolchain. A worktree warmed before that change just needs
 its uv step re-run.
+
+It also passes `--python`, matched to the base's CI: `3.14t` (free-threaded) when
+`.github/workflows/rotki_ci.yml` sets `freethreaded: true`, otherwise `3.14+gil`,
+with the version read from `.github/.env.ci`. No base ships a `.python-version`,
+and a bare request lets uv pick its newest managed build, which can be the
+free-threaded one; on a base whose lock still has packages without a
+free-threaded wheel, those source builds then fail.
 
 ### Install
 
@@ -518,6 +525,12 @@ whose branch is already merged into an upstream base — the worktree analogue o
 lists the candidates, and asks before removing (`--yes` skips the prompt). Each
 removal reuses the normal teardown: dirty/unpushed guard (override with
 `--force`), dev:web instance clean, worktree + branch deletion.
+
+A single `rwt rm <name>` also accepts "unpushed" commits when the branch's HEAD
+is the head SHA of a merged upstream PR (looked up with `gh`). rotki
+squash-merges, so once the fork branch is deleted after the merge, ancestry and
+patch equivalence both miss and every commit reads as unpushed. Without `gh`,
+or if HEAD has moved past the merged head, the guard refuses as before.
 
 ```sh
 rwt refresh && rwt rm --merged       # warm bases, then clear landed worktrees
