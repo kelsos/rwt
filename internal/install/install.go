@@ -75,6 +75,9 @@ func stepsWith(worktree string) []Step {
 	// installed that silence reaches every commit, which is not a trade worth the
 	// install time it saves.
 	uv := []string{"uv", "sync", "--frozen", "--all-groups"}
+	if request, ok := uvPythonRequest(worktree); ok {
+		uv = append(uv, "--python", request)
+	}
 	steps := []Step{
 		{
 			Name: "pnpm",
