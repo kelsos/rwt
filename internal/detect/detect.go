@@ -20,14 +20,14 @@ type Result struct {
 
 // Capability checks the target worktree cheaply, without booting Node.
 //
-//  1. Primary signal: frontend/scripts/dev-instance/index.ts exists.
+//  1. Primary signal: the frontend/scripts/dev-instance/ module directory exists.
 //  2. Secondary confirmation: start-dev.ts imports from ./dev-instance.
 func Capability(worktree string) Result {
-	indexPath := filepath.Join(worktree, rotki.DevInstanceIndexRel)
-	if _, err := os.Stat(indexPath); err != nil {
+	dir := filepath.Join(worktree, rotki.DevInstanceDirRel)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return Result{
 			Capable: false,
-			Reason:  rotki.DevInstanceIndexRel + " not present",
+			Reason:  rotki.DevInstanceDirRel + "/ not present",
 		}
 	}
 

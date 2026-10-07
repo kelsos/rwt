@@ -186,10 +186,12 @@ func GroupsFor(paths []string) []string {
 var AllGroups = []string{GroupFrontend, GroupBackend, GroupColibri, GroupStarling, GroupDocs}
 
 // Capability-detection paths, relative to a worktree root. The dev:web
-// multi-instance feature shipped as the dev-instance/ module split.
+// multi-instance feature shipped as the dev-instance/ module. Probe the
+// directory, not a file in it: develop dropped the module's index.ts barrel,
+// and a probe on one file inside it reported every develop worktree incapable.
 const (
-	DevInstanceIndexRel = "frontend/scripts/dev-instance/index.ts"
-	StartDevRel         = "frontend/scripts/start-dev.ts"
+	DevInstanceDirRel = "frontend/scripts/dev-instance"
+	StartDevRel       = "frontend/scripts/start-dev.ts"
 )
 
 // Umbrella resolves the rotki/rotki umbrella directory that contains the
